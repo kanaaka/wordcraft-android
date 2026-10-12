@@ -1,0 +1,6 @@
+# build output and local signing material — never part of this repository
+target/
+*.apk
+*.jks
+*.keystore
+.gradle/

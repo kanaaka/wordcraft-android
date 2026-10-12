@@ -1,0 +1,114 @@
+[package]
+name = "wordcraft-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WordCraft on Android: the real engine and egui shell on winit's NativeActivity backend"
+publish = false
+
+# cargo-apk turns this cdylib into the APK's lib/arm64-v8a/libwordcraft.so, and the artifact
+# name is what the injected `android.app.lib_name` meta-data points at (with `-` → `_`). A
+# mismatch yields an APK that installs and then dies on launch, so the lib name is deliberate:
+# the same shape `apps/vectorcraft-android` and `apps/photocraft-android` use.
+[lib]
+name = "wordcraft"
+crate-type = ["cdylib"]
+
+# Omit `[lints] workspace = true`: the workspace forbids unsafe_code, which trips on the
+# `#[unsafe(no_mangle)]` entry point this crate needs, and nothing else here wants the lints.
+[dependencies]
+# `jni` is the same 0.22 android-activity itself depends on, so this unifies rather than
+# compiling a second JNI layer. It is used for exactly one thing: sending the intent that opens a
+# second window (`new_window`), which no manifest metadata can express (see `src/lib.rs`).
+jni = "0.22"
+wordcraft-doc = { workspace = true }
+wordcraft-engine = { workspace = true }
+wordcraft-ui-egui = { workspace = true }
+egui = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true }
+
+# `android-native-activity` is the whole reason this builds. Without a backend feature,
+# `android-activity` is pulled with no backend at all and eframe fails with
+# `file not found for module activity_impl` plus
+# `Either "game-activity" or "native-activity" must be enabled as features` — a missing
+# feature, not a code problem.
+#
+# `accesskit` is deliberately absent. WordCraft's `ui-egui` has no eframe dependency at all
+# (the desktop shell is the eframe user), so accesskit is nowhere in this crate's graph and
+# eframe's `compile_error!("\`accesskit\` feature is only available with
+# \`android-game-activity\`")` cannot be reached — the same situation as VectorCraft.
+#
+# The android-* features are inert elsewhere (winit only binds android-activity under
+# cfg(target_os = "android")), so the host workspace is unaffected.
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "android-native-activity"] }
+# Needed to name `AndroidApp` for `NativeOptions::android_app`; eframe does not re-export
+# winit. Pinned to the exact version eframe/egui-winit build against.
+winit = { version = "=0.30.13", default-features = false, features = ["android-native-activity"] }
+
+[package.metadata.android]
+package = "ai.storyteller.wordcraft"
+apk_name = "wordcraft"
+build_targets = ["aarch64-linux-android"]
+strip = "strip"
+# Theme resources — the two edge-to-edge fixes live in res/values/styles.xml.
+resources = "res"
+
+[package.metadata.android.sdk]
+# 26 = Android 8.0: the floor for a modern Vulkan driver surface.
+min_sdk_version = 26
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "WordCraft"
+# Variant B (immersive fullscreen) is what fixed the menu bar sitting under the notification
+# bar on the tablet; variant A is the alternative — see res/values/styles.xml.
+theme = "@style/WordcraftFullscreen"
+icon = "@mipmap/ic_launcher"
+# The engine writes documents through a memory map and formats them; keep the .so uncompressed
+# so it can be mapped from the APK directly.
+extract_native_libs = true
+
+# The Activity must not be *re-created* when the window is resized or the app is put into
+# split-screen. Entering or leaving multi-window changes `screenLayout` and `smallestScreenSize`,
+# and an Activity that does not declare them is destroyed and built again. For a NativeActivity
+# that is fatal: winit's Android backend does not even forward the destroy (it logs
+# `TODO: forward onDestroy notification to application` and carries on), so the old event loop
+# keeps running against a dead Activity while a second one starts — the app hangs, then is killed.
+# cargo-apk's default is only `orientation|keyboardHidden|screenSize`; these are the ones a
+# fullscreen, resizable native app handles itself.
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|density|uiMode|fontScale|keyboard|navigation|touchscreen"
+
+
+# Rendering is a CPU rasteriser (vello_cpu) plus egui's wgpu present, so Vulkan is preferred
+# but not required.
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.vulkan.level"
+required = false
+version = 1
+
+# Storage access for the in-app picker (src/file_picker.rs). Android 10+ forbids reading shared
+# storage by path, so the pager probes each root and only offers the ones it can actually read —
+# no permission is needed for the app's own folder, and these just widen what is reachable.
+#
+# MANAGE_EXTERNAL_STORAGE ("All files access") cannot be requested at runtime: it is granted by
+# hand in Settings ▸ Apps ▸ WordCraft ▸ Special access. Google Play restricts it to
+# file-manager-class apps, which does not apply to a sideloaded build.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MANAGE_EXTERNAL_STORAGE"
+
+# Reading media without the heavy permission (Android 13+); grant under
+# Settings ▸ Apps ▸ WordCraft ▸ Permissions ▸ Photos and videos.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_IMAGES"
+
+# Legacy storage permissions, only meaningful before Android 11.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+max_sdk_version = 32
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WRITE_EXTERNAL_STORAGE"
+max_sdk_version = 29

@@ -1,0 +1,5 @@
+# Keep every text file in this repository LF, whatever the checkout platform does,
+# so a patch produced here applies on any machine, and a *nix clone does not end up with CRLF.
+* text=auto eol=lf
+*.png binary
+*.patch -text

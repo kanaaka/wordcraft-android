@@ -1,0 +1,26 @@
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 25b4465..170fffb 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -90,6 +90,10 @@ pub struct Services {
+     /// Desktop: the picture on the system clipboard, if any — egui's paste only carries text
+     /// (#45). Read when Paste finds no text; see [`paste_picture`].
+     pub clipboard_picture: Option<Box<dyn Fn() -> Option<paste_picture::ClipboardPicture>>>,
++    /// Host: open a second window on this app, as Window ▸ New Window asks for. Android answers
++    /// with a second Activity, so two documents can be put side by side. Unset (the desktop, the
++    /// web, and any host that has no way to) leaves `view.newWindow` showing its dialog.
++    pub new_window: Option<Box<dyn Fn()>>,
+ }
+ 
+ /// Files delivered asynchronously.
+@@ -596,6 +600,10 @@ impl WordApp {
+                     self.ui.backstage_page = "options".into();
+                 }
+                 "pasteSpecial" => self.dialog = Some(dialogs::Dialog::paste_special(self, req)),
++                "newWindow" => match &self.services.new_window {
++                    Some(open) => open(),
++                    None => self.dialog = dialogs::Dialog::open(what, self),
++                },
+                 other => self.dialog = dialogs::Dialog::open(other, self),
+             }
+         }

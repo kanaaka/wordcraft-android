@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Two fixes for the Android 15 edge-to-edge issue, so the tablet can pick one.
+  The same two the PhotoCraft port shipped.
+
+  Cause: the APK targets targetSdkVersion 35, and Android 15 enforces
+  edge-to-edge for every app targeting 35+. The system stops insetting the
+  window and draws the app underneath a transparent status bar. eframe/winit
+  implements no inset handling (winit 0.30.13 has no Android safe-area API), so
+  egui lays WordCraft's app bar and menu bar out at y=0 — behind the
+  notification bar, where they are drawn but never receive touches.
+
+  Both themes are one attribute deep; the difference is whether the status bar
+  is made room for, or hidden entirely.
+-->
+<resources>
+
+    <!--
+      VARIANT A — keep the notification bar, put the app below it.
+
+      `windowOptOutEdgeToEdgeEnforcement` restores the old window fitting: the
+      system insets the activity's window below the status bar again, so the
+      NativeActivity surface begins underneath it and the menu bar lands where it
+      can be tapped.
+
+      Android 15 only. The platform marks this attribute deprecated in favour of
+      apps consuming WindowInsets themselves, and Android 16 ignores it. The
+      version-proof equivalent is a JNI call to
+      WindowInsetsController.setOnApplyWindowInsetsListener plus a top spacer in
+      egui, which is not implemented here.
+    -->
+    <style name="WordcraftStatusBar" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+
+    <!--
+      VARIANT B — immersive, like a game: hide the status bar.
+
+      `windowFullscreen` hides the status bar, so nothing overlays the menu bar
+      and the canvas gets the whole screen height. This is the legacy mechanism,
+      so it is less certain than variant A on Android 15 — if the status bar
+      survives the edge-to-edge enforcement the menu bar stays unreachable. This
+      is the variant that was confirmed working on the tablet for PhotoCraft.
+
+      Note this hides only the *status* bar. Hiding the navigation bar too needs
+      the immersive-mode API (WindowInsetsController.hide(Type.systemBars())),
+      which is Java-only and would need a JNI bridge; there is no Java in this
+      project.
+    -->
+    <style name="WordcraftFullscreen" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <item name="android:windowFullscreen">true</item>
+    </style>
+
+</resources>
