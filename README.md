@@ -74,7 +74,7 @@ A tick means the check was *run*, not inferred; the wording says how far it goes
 |---|---|---|
 | `patches/…patch` applies to a clean checkout of the pin | fresh `git init` + `git fetch --depth 1 origin 2ffba93b5189410a415970be179dcf481092d756` + `git apply --check` | ✅ applies cleanly |
 | The assembled tree equals the tree the APK was built from | file-by-file SHA-256 (line endings normalised) over every patched file and every file of the port crate | ✅ 12 files identical, none differing |
-| The port crate compiles for Android | `cargo check -p wordcraft-android --target aarch64-linux-android` | ✅ exit 0 |
+| The port crate compiles for Android | `cargo check -p wordcraft-android --target aarch64-linux-android`, run in a tree assembled from scratch (fresh `git fetch` of the pin, patch applied, port crate copied in) | ✅ exit 0 |
 | APK is signed and is the right artifact | `apksigner verify --verbose`, `aapt2 dump badging`, sha256 | ✅ v2/v3 signatures true, `native-code: 'arm64-v8a'`, package `ai.storyteller.wordcraft` |
 | Behaviour on real hardware | hand-testing on the porter's arm64 tablet | ⚠️ the fixes below were found and driven by that testing; each published binary is not individually re-verified here |
 
