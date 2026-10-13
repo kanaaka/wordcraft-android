@@ -41,7 +41,10 @@ pub struct Tracked {
 
 impl Tracked {
     /// Fold this frame's events into the tracked state and report it back into them.
-    pub fn apply(&mut self, raw: &mut egui::RawInput) {
+    ///
+    /// Returns the state as `egui::Modifiers`, for the caller that needs to put it on an event of
+    /// its own — the shell's touch-to-wheel bridge does (Ctrl+wheel zooms).
+    pub fn apply(&mut self, raw: &mut egui::RawInput) -> egui::Modifiers {
         let events = std::mem::take(&mut raw.events);
         let mut out = Vec::with_capacity(events.len() + 1);
         for mut event in events {
@@ -57,8 +60,10 @@ impl Tracked {
         }
         // egui's `InputState` takes modifiers from this event and nowhere else, and a frame with no
         // key events in it — the vast majority — still has to report the state it is holding.
-        out.push(egui::Event::ModifiersChanged(self.reported()));
+        let reported = self.reported();
+        out.push(egui::Event::ModifiersChanged(reported));
         raw.events = out;
+        reported
     }
 
     /// The state as egui wants to see it.

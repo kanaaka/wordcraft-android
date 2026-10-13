@@ -1,3 +1,17 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 98af82c..be5f8ca 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,3 +1,9 @@
++[patch.crates-io]
++# Android's mouse wheel and hover (see vendor/README.md). Every shell in this repo reads a pointer's
++# wheel events to scroll; winit's Android backend drops those MotionActions, so without this an
++# Android build cannot be scrolled by a mouse or a trackpad.
++winit = { path = "vendor/winit" }
++
+ [workspace]
+ resolver = "3"
+ members = ["crates/*", "apps/*", "xtask"]
 diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
 index 25b4465..170fffb 100644
 --- a/crates/ui-egui/src/lib.rs

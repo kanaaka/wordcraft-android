@@ -31,6 +31,12 @@
     -->
     <style name="WordcraftStatusBar" parent="@android:style/Theme.DeviceDefault.NoActionBar">
         <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+        <!-- `windowSoftInputMode` has no home in cargo-apk's manifest schema, and none is needed:
+             it is a *themeable* attribute (`attrs.xml` declares the flags and the platform's own
+             base theme sets it as an item), so the theme can carry it. Verified to survive into the
+             built resources as `0x0101022b=0x10`. See the note under WordcraftFullscreen for what it
+             does and does not achieve on Android 15. -->
+        <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
 
     <!--
@@ -49,6 +55,14 @@
     -->
     <style name="WordcraftFullscreen" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
         <item name="android:windowFullscreen">true</item>
+        <!-- See the note in WordcraftStatusBar: `adjustResize` asks the system to shrink the window
+             for the keyboard and the taskbar instead of drawing them over the app. On Android 15 it
+             is not enough on its own: the window manager honours the flag (`sim={adjust=resize}` in
+             `dumpsys window`) but nothing consumes the insets — `mImeInsetsConsumed=false` — because
+             targeting SDK 35 puts the app in charge of them, and consuming them needs a Java-side
+             WindowInsets call this project has no bridge for. Kept because it is the right thing to
+             ask for and other Android versions and devices do act on it. -->
+        <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
 
 </resources>

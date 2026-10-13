@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.1.1 — 2026-10-13 (scrolling, modifiers, fonts, picker wording)
+
+| | |
+|---|---|
+| APK | `wordcraft-0.5.0-arm64-v8a-20261013.apk` (19.9 MB) — supersedes the v0.1.0 asset, same signing key |
+| sha256 | `9c21e2ab11f91c89bc00188d685d55b800688eabf2d531a335ea08a9caf619f8` |
+| Built from | upstream `storytold/wordcraft` @ `2ffba93b5189410a415970be179dcf481092d756` + this repository at the commit that released it |
+| Package | `ai.storyteller.wordcraft` — versionName `0.5.0`, versionCode `16778496`, minSdk 26, targetSdk 35 |
+| ABI | `arm64-v8a` only |
+
+### Changed
+- **Two-finger scrolling.** A two-finger drag now scrolls the document (synthesised `MouseWheel`
+  events from the touch centroid, with the lift event that starts the kinetic coast); one finger still
+  selects, a pinch still zooms, and Ctrl+wheel zooms.
+- **A mouse or trackpad wheel works.** winit's Android backend drops motion actions, so the wheel and
+  hover events never reached the app; this repository now carries a **vendored, patched winit**
+  (`vendor/winit/`) that forwards them, referenced by a `[patch.crates-io]` entry in the workspace
+  manifest. The build recipe copies it in.
+- **A *Fonts* folder** at `Android/media/<package>/Fonts`, with `.fonts` and `.local/share/fonts`
+  symlinked to it, so a `.ttf` copied in over a USB cable is picked up — previously there was no way
+  to install a font on the tablet at all.
+- **Picker wording corrected** (see the notes): no grant advice to a user who already granted, and a
+  USB tip that matches the folder.
+- **`android:windowSoftInputMode=adjustResize`** asked for through both theme variants, so the system
+  shrinks the window for the keyboard and the taskbar. On Android 15 the flag is honoured but nothing
+  consumes the insets yet — see the notes for exactly what it does and does not achieve.
+
+### Notes
+The build was made from exactly the source in this repository (upstream pin + the patch + the port
+crate) and signed with the same local test key as v0.1.0, so it installs over it.
+
+
 ## v0.1.0 — first published port (WordCraft 0.5.0)
 
 | | |

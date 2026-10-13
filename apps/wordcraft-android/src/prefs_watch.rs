@@ -85,6 +85,9 @@ impl Writer {
 
 /// How many windows of this app are running in this process.
 ///
+/// Not every shell has a quit path to ask (`GridCraft` ends its process directly), so this is
+/// allowed to go uncalled there rather than being cfg'd per app.
+///
 /// A second window is a second `android_main` on its own thread (a second Activity), so this
 /// counts loops rather than apps: the shell registers one at the start and drops it when its loop
 /// ends. It is what tells a window whether ending it should end the *process* (the last window) or
@@ -92,6 +95,10 @@ impl Writer {
 static WINDOWS: AtomicUsize = AtomicUsize::new(0);
 
 /// The number of windows this process has running, including the calling one.
+///
+/// Not every shell has a quit path to ask (`GridCraft` ends its process directly), so this is
+/// allowed to go uncalled there.
+#[allow(dead_code)]
 pub fn windows() -> usize {
     WINDOWS.load(Ordering::Relaxed)
 }

@@ -125,6 +125,105 @@ app under a transparent status bar on Android 15, and `res/mipmap-*` carries the
 
 Nothing else upstream is touched.
 
+## 2026-10-13 — A vendored winit, so a mouse wheel is not swallowed
+
+`touch_scroll.rs` covers fingers. A **mouse or trackpad** attached to the tablet was still dead: winit's
+Android backend drops `DeviceEvent::Motion`-style actions outright, so the wheel and hover events never
+reach the app, on any of these ports.
+
+WordCraft carries the fix as a **vendored winit** — `vendor/winit/`, patched to forward those motion
+actions, with `[patch.crates-io] winit = { path = "vendor/winit" }` in the workspace manifest. That is
+why this repository ships a `vendor/` directory and why the build recipe copies it in: without it the
+manifest does not resolve. The other ports read a pointer's wheel events the same way and would need
+the same vendored crate; only this one has it so far.
+
+**Checked:** the workspace resolves and the crate compiles for `aarch64-linux-android` with the
+vendored winit in place (this is the tree the released APK was built from).
+
+## 2026-10-13 — `adjustResize`, asked for through the theme
+
+`android:windowSoftInputMode` has no home in cargo-apk's manifest schema, but it is a *themeable*
+attribute (the platform's own base theme sets it as an item), so both theme variants now carry
+`<item name="android:windowSoftInputMode">adjustResize</item>`. It asks the system to shrink the window
+for the keyboard and the taskbar instead of drawing them over the app.
+
+**What it does and does not achieve**, measured with `dumpsys window`: the window manager honours the
+flag (`sim={adjust=resize}`), but nothing consumes the insets (`mImeInsetsConsumed=false`) — targeting
+SDK 35 puts the app in charge of them, and consuming them needs a Java-side `WindowInsets` call this
+project has no bridge for. It is kept because it is the right thing to ask for, and other Android
+versions and devices do act on it.
+
+## 2026-10-13 — Two-finger scrolling (and the wheel Android never sends)
+
+**The complaint:** on the tablet a finger drag selected text instead of moving the page, and there was
+no way to scroll at all.
+
+**Why:** every app in this suite scrolls from `egui::Event::MouseWheel` — `WordCraft`'s `scroll.rs` is
+explicit about the contract (pixel deltas move the page 1:1, `TouchPhase::End` on the last event is the
+"fingers lifted" signal that starts the kinetic coast, wheel notches count as three lines). None of
+that runs on Android, because winit's Android backend has no mouse and therefore emits no wheel
+events at all (`src/platform_impl/android/mod.rs` sends six window events and a wheel is not one of
+them). Touch arrives as `WindowEvent::Touch`, which egui-winit forwards as `egui::Event::Touch` *and*
+turns into an emulated mouse pointer — so a finger drags a selection and the page never moves.
+
+**The change — `src/touch_scroll.rs` (new, 231 lines, 3 tests), wired into the shell's
+`raw_input_hook`:**
+
+- one finger: untouched, so dragging still selects — the emulated pointer works as before;
+- two or more fingers: the centroid's movement becomes `Event::MouseWheel` with
+  `MouseWheelUnit::Point` and `TouchPhase::Move`;
+- a final `TouchPhase::End` wheel event when the fingers lift, which is what makes the app coast to a
+  stop instead of stopping dead;
+- while a two-finger gesture is live the emulated **pointer button** events are dropped, or the first
+  finger would drag a selection across the page at the same time as it scrolls. Pointer *position*
+  events are kept, because the apps only scroll while the pointer is over the canvas;
+- the touch events themselves stay in the batch: egui's pinch handling reads them, so a pinch still
+  zooms and a two-finger *pan* moves nothing but the page.
+
+**Ctrl+wheel zoom** works too, which is why `modifiers.rs`'s `apply()` now returns the state it tracked
+(`egui::Modifiers`) instead of nothing: the bridge stamps it onto the wheel event it synthesises, and
+the touch events carry it as well.
+
+**Checked:** the three tests in `touch_scroll.rs` (one-finger pass-through, two-finger centroid →
+wheel, the lift event) run on the host with `cargo test -p wordcraft-android`; the shell compiles for
+`aarch64-linux-android`; and the string table of the `.so` inside the released APK carries the module.
+On-device behaviour is the porter's tablet test, not an automated one.
+
+## 2026-10-13 — `modifiers.rs` returns the tracked state
+
+`apply(&mut self, raw)` now returns the `egui::Modifiers` it folded into the frame's events. The
+synthesised two-finger wheel event has to carry modifiers itself (Ctrl+wheel is zoom in these apps,
+plain wheel is scroll), and only the tracker knows them, so the state is handed back rather than
+recomputed. Nothing else about the modifier handling changed.
+
+## 2026-10-13 — The *Fonts* folder, in the shells that did not have one
+
+PhotoCraft and VectorCraft already pointed their platform-font hook at a USB-visible
+`Android/media/<package>/Fonts`; this shell did not, so there was no way to install a font on the
+tablet at all.
+
+The shell now creates `<App media>/Fonts`, sets `HOME` to the app's media directory, and symlinks
+`.fonts` and `.local/share/fonts` to that one folder, so every path a font scan is likely to consult
+lands in the same visible place. A `.ttf`/`.otf` dropped in over a cable appears in the app's font
+list on the next scan. `Android/media` rather than `Android/data`, deliberately: Android 11+ hides
+`Android/data` from MTP.
+
+## 2026-10-13 — The picker no longer tells a *granted* user to grant access
+
+The empty-folder message in shared storage used to end with "Grant *All files access*…", and it was
+shown to everyone, including users who had already granted it. The trigger had been
+`/storage/emulated/0/Android/data` failing to list — **measured on the emulator: that folder stays
+unlistable to the app on API 35 even with the grant**, so the tell was wrong and the advice was
+insulting to the one user who had done what it asked.
+
+Now the note is conditional on the folder being shared storage, is worded as a possibility ("If your
+files are here, the app may lack shared-storage access…"), and leaves the decision to the user,
+because the grant cannot be probed from inside the app.
+
+The USB tip became folder-dependent for the same reason — Android 11+ hides `Android/data` from MTP,
+so a file copied there over a cable never arrives and the folder merely looks empty (which reads as a
+picker bug), while `Android/media` *is* reachable over a cable. Saying the wrong one of those two is
+worse than saying nothing.
 ## What is deliberately *not* in the patch
 
 `Cargo.lock` is excluded on purpose: it moves only because the port crate is a new workspace member,
@@ -133,7 +232,7 @@ and `cargo` regenerates it on the first build. The patch contains only changes t
 
 ## Not verified here
 
-The APK in Releases was not re-run on a device while publishing this repository. The fixes above came
+The APK attached to **v0.1.1** was built from exactly this tree on 2026-10-13 (upstream pin + the patch + the port crate + the vendored winit), and the checks in the README's verification table were run against it. What that does *not* buy is a runtime claim: it was not launched on a device or emulator as part of publishing, so every behavioural statement below rests on the hand-testing the porter did on an arm64 tablet. The fixes above came
 from the porter's hand-testing on an arm64 tablet — the bugs they fix were reported there — but there
 is no automated device test here, and "verified" in the README means source-side checks plus that
 testing, not a fresh run of this exact binary.

@@ -71,6 +71,7 @@ use wordcraft_ui_egui::{FileDialogRequest, Services, UiState, WordApp};
 mod file_picker;
 mod modifiers;
 mod prefs_watch;
+mod touch_scroll;
 
 /// The app's private data directory, captured in `android_main` before any service closure
 /// runs: `<internal storage>/Android/data/ai.storyteller.wordcraft/files`.
@@ -153,14 +154,6 @@ fn file_dialog(req: FileDialogRequest) -> Receiver<Option<String>> {
     rx
 }
 
-/// The platform-neutral half of the desktop `services()`.
-///
-/// `file_dialog` carries the whole Open/Save As/Export/Insert-Picture path; everything else the
-/// desktop fills — `pick_open`/`pick_save` (the blocking dialogs), the web `open_async`/`inbox`/
-/// `download`, `print` and the clipboard — is deliberately left out. Leaving `pick_open` and
-/// `pick_save` out is what makes the app use `file_dialog` instead of a blocking dialog, and
-/// leaving `download` out is what makes File ▸ Save fall through to Save As rather than looking
-/// for a browser to hand bytes to.
 // This window's `AndroidApp`, kept for what the app asks of the platform *after* start-up —
 // opening a second window, today.
 //
@@ -250,8 +243,17 @@ fn new_window() {
     }
 }
 
-/// What this host supplies: the in-app file picker, and — on Android, the only place with a second
-/// window to open — [`new_window`].
+/// The platform-neutral half of the desktop `services()`.
+///
+/// `file_dialog` carries the whole Open/Save As/Export/Insert-Picture path; everything else the
+/// desktop fills — `pick_open`/`pick_save` (the blocking dialogs), the web `open_async`/`inbox`/
+/// `download`, `print` and the clipboard — is deliberately left out. Leaving `pick_open` and
+/// `pick_save` out is what makes the app use `file_dialog` instead of a blocking dialog, and
+/// leaving `download` out is what makes File ▸ Save fall through to Save As rather than looking
+/// for a browser to hand bytes to.
+///
+/// What it supplies is the in-app file picker, and — on Android, the only place with a second window
+/// to open — [`new_window`]; the host build supplies just the picker.
 #[cfg(target_os = "android")]
 fn android_services() -> Services {
     Services {
@@ -332,6 +334,9 @@ pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
         let _ = std::fs::create_dir_all(&ext);
         let _ = file_picker::EXT_DIR.set(ext);
     }
+    // Fonts: a folder the user can drop a font file into over USB, pointed at where this app's font
+    // scan looks (see `file_picker::register_fonts`).
+    file_picker::register_fonts();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("WordCraft").with_app_id("ai.storyteller.wordcraft"),
@@ -360,6 +365,7 @@ pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
             Ok(Box::new(Shell {
                 inner: app,
                 modifiers: modifiers::Tracked::default(),
+                touch: touch_scroll::TouchScroll::default(),
                 prefs: prefs_watch::Writer::new(prefs_file(), PREFS_EVERY),
             }))
         }),
@@ -386,6 +392,8 @@ struct Shell {
     /// backend sends no `ModifiersChanged` at all, which is why Shift+click and every Ctrl
     /// shortcut are dead without this (see `modifiers`).
     modifiers: modifiers::Tracked,
+    /// Two-finger scrolling, translated from touches into wheel events (see [`touch_scroll`]).
+    touch: touch_scroll::TouchScroll,
     /// The preferences, written as the app runs rather than only on the way out: Android never
     /// gives that ending, so a swipe from Recents would otherwise take every preference with it
     /// (see [`prefs_watch`]).
@@ -442,7 +450,11 @@ impl eframe::App for Shell {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         // Before the app, so the frame it sees already has the modifiers a desktop backend would
         // have reported (see `modifiers`).
-        self.modifiers.apply(raw);
+        let modifiers = self.modifiers.apply(raw);
+        // Then the touches: winit's Android backend has no mouse and so sends no wheel events at
+        // all, which is why nothing scrolled. A two-finger drag becomes one here (see
+        // `touch_scroll`).
+        self.touch.apply(raw, modifiers);
         self.inner.raw_input_hook(raw);
     }
 
@@ -459,5 +471,30 @@ impl eframe::App for Shell {
     fn on_exit(&mut self) {
         let bytes = prefs_bytes(&self.inner);
         self.prefs.store_now(&bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The vendored winit is what lets a mouse or a trackpad scroll an Android build at all.
+    /// Upstream's Android backend drops `MotionAction::Scroll` and `HoverMove` (they fall into
+    /// `_ => None // TODO mouse events`), so a dependency bump that resolves winit from crates.io
+    /// again would silently take the wheel away: re-apply the patch, or drop the copy once a winit
+    /// 0.30 release has it (vendor/README.md).
+    #[test]
+    fn winit_carries_the_android_scroll_and_hover_patch() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+        let winit = lock.split("[[package]]").find(|p| p.contains("\nname = \"winit\"\n")).expect("winit is in Cargo.lock");
+        assert!(!winit.contains("\nsource = "), "winit must resolve to vendor/winit, not:{winit}");
+
+        let android = std::fs::read_to_string(root.join("vendor/winit/src/platform_impl/android/mod.rs")).unwrap();
+        let scroll = "MotionAction::Scroll => {";
+        let hover = "MotionAction::HoverMove => {";
+        assert!(android.contains(scroll), "vendor/winit lost its {scroll} patch");
+        assert!(android.contains(hover), "vendor/winit lost its {hover} patch");
+        assert!(android.contains("event::WindowEvent::MouseWheel"), "the scroll patch must emit a wheel event");
+        assert!(android.contains("event::WindowEvent::CursorMoved { device_id, position }"), "and must set the pointer position, or an app that only scrolls when hovered ignores it");
+        assert!(android.contains("event::WindowEvent::CursorMoved"), "the hover patch must move the pointer");
     }
 }

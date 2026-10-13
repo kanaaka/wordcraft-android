@@ -187,6 +187,83 @@ fn roots() -> Vec<(String, PathBuf)> {
     v
 }
 
+/// The app's folder in `Android/media`, which *is* reachable over a USB cable (`Android/data` is
+/// not, from Android 11 on): `…/Android/data/<package>/files` → `…/Android/media/<package>`.
+pub fn media_dir() -> Option<PathBuf> {
+    media_dir_from(EXT_DIR.get()?)
+}
+
+/// The derivation, on its own so it can be pinned by a test: `…/Android/data/<package>/files`
+/// → `…/Android/media/<package>`.
+fn media_dir_from(external_files: &Path) -> Option<PathBuf> {
+    let package_dir = external_files.parent()?;
+    let android = package_dir.parent()?.parent()?;
+    Some(android.join("media").join(package_dir.file_name()?))
+}
+
+/// The Fonts folder inside it: the visible folder a font file is dropped into.
+pub fn fonts_dir() -> Option<PathBuf> {
+    Some(media_dir()?.join("Fonts"))
+}
+
+/// Point the font scan at a folder the user can reach over a USB cable.
+///
+/// # Why this is needed on Android and on no other platform
+///
+/// `system_font_dirs()` in this app's font code takes its Linux branch here and scans
+/// `/usr/share/fonts`, `$HOME/.fonts` and `$HOME/.local/share/fonts` — and none of those exist on
+/// Android: the platform's own faces are in `/system/fonts`, and `HOME` is unset. So the app knows
+/// only its bundled families and there is no way to add one — where VectorCraft and PhotoCraft have
+/// `set_platform_font_files`/`set_app_font_dir` hooks, this app's font code has neither. It *does*
+/// read `HOME` at every scan, though, so pointing `HOME` at the app's media folder and putting the
+/// fonts where that branch looks gives the same result with no change to the app: drop a `.ttf`
+/// into `Fonts/` over the cable, reopen the app, and it is in the font list.
+///
+/// The two names the scan looks for are hidden ones (`.fonts`, `.local/share/fonts`), so both are
+/// symlinks to the visible `Fonts` folder — the user drops a file in one place and the app reads it
+/// from the other.
+///
+/// The scan runs once per process (a `OnceLock` in the app), which is why a new font needs the app
+/// reopened rather than a reload.
+#[cfg(target_os = "android")]
+pub fn register_fonts() {
+    let Some(fonts) = fonts_dir() else {
+        log::warn!("fonts: no Fonts folder to register; adding a font will not work");
+        return;
+    };
+    let Some(media) = media_dir() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&fonts) {
+        log::warn!("fonts: could not make {}: {e}", fonts.display());
+        return;
+    }
+    log::info!("fonts: the Fonts folder is {}", fonts.display());
+    // SAFETY: called from `android_main` before eframe starts, so nothing else is reading the
+    // environment yet; the app's font code only ever reads `HOME`.
+    unsafe { std::env::set_var("HOME", &media) };
+    link_fonts_dir(&fonts, &media.join(".fonts"));
+    link_fonts_dir(&fonts, &media.join(".local").join("share").join("fonts"));
+}
+
+/// Make `link` a directory symlink to `target`, replacing a stale one. Failure is logged and
+/// survivable: the folder the user drops fonts into still exists, the app just cannot see it yet.
+#[cfg(target_os = "android")]
+fn link_fonts_dir(target: &Path, link: &Path) {
+    if let Some(parent) = link.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::read_link(link).is_ok() {
+        let _ = std::fs::remove_file(link);
+    }
+    if !link.exists()
+        && let Err(e) = std::os::unix::fs::symlink(target, link)
+    {
+        log::warn!("fonts: could not link {} → {}: {e}", link.display(), target.display());
+    }
+}
+
+
 /// The best directory to open first: the app folder is always writable, so it
 /// is the only safe default — a desktop path arriving as a suggestion never
 /// exists on the device.
