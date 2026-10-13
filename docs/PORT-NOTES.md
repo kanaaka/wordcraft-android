@@ -5,7 +5,7 @@ Upstream: [`storytold/wordcraft`](https://github.com/storytold/wordcraft) @
 Published APK: `wordcraft-0.5.0-arm64-v8a-v4.apk`
 
 The port is `apps/wordcraft-android/` (`src/lib.rs` 463 lines, `src/file_picker.rs` 403,
-`src/modifiers.rs` 92, `src/prefs_watch.rs` 134) plus **one small upstream change** — an 8-line seam
+`src/modifiers.rs` 202, `src/prefs_watch.rs` 134) plus **one small upstream change** — an 8-line seam
 in `crates/ui-egui/src/lib.rs` that lets a host open a second window. Everything below is the edit
 log: what was wrong, why, what changed, how far it was checked.
 
@@ -224,6 +224,21 @@ The USB tip became folder-dependent for the same reason — Android 11+ hides `A
 so a file copied there over a cable never arrives and the folder merely looks empty (which reads as a
 picker bug), while `Android/media` *is* reachable over a cable. Saying the wrong one of those two is
 worse than saying nothing.
+## 2026-10-13 — Ctrl shortcuts: the tracker reads the physical key too
+
+### Fixed
+- **Ctrl+anything did nothing, while Shift+click and Shift+arrow worked.** winit's Android
+  logical-key table names `Shift` and `Alt` but **not** `Control` — so a Ctrl press arrives with an
+  unidentified *logical* key (egui-winit falls back to the physical one) while its physical key is
+  correctly `ControlLeft`/`ControlRight`. `src/modifiers.rs` matched the logical key alone, so it
+  never saw Ctrl go down: Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+S, Ctrl+B and every other modifier shortcut
+  was dead, and only the modifiers winit happens to name worked. The tracker now reads the physical
+  key as well as the logical one, on both left and right, and keeps everything else: the per-event
+  modifier copies (so a press and a click in one frame stay ordered) and `ModifiersChanged` as the
+  authority (so a modifier held while the app goes to the background does not stick).
+  Verified on an Android 15 emulator: with text typed in the document, `Ctrl+A` selects it
+  (the mini format bar appears) and `Ctrl+B` emboldens it, ribbon state included.
+
 ## What is deliberately *not* in the patch
 
 `Cargo.lock` is excluded on purpose: it moves only because the port crate is a new workspace member,
@@ -232,7 +247,7 @@ and `cargo` regenerates it on the first build. The patch contains only changes t
 
 ## Not verified here
 
-The APK attached to **v0.1.1** was built from exactly this tree on 2026-10-13 (upstream pin + the patch + the port crate + the vendored winit), and the checks in the README's verification table were run against it. What that does *not* buy is a runtime claim: it was not launched on a device or emulator as part of publishing, so every behavioural statement below rests on the hand-testing the porter did on an arm64 tablet. The fixes above came
+The APK attached to **v0.1.2** was built from exactly this tree on 2026-10-13 (upstream pin + the patch + the port crate + the vendored winit), and the checks in the README's verification table were run against it. What that does *not* buy is a runtime claim: it was not launched on a device or emulator as part of publishing, so every behavioural statement below rests on the hand-testing the porter did on an arm64 tablet. The fixes above came
 from the porter's hand-testing on an arm64 tablet — the bugs they fix were reported there — but there
 is no automated device test here, and "verified" in the README means source-side checks plus that
 testing, not a fresh run of this exact binary.

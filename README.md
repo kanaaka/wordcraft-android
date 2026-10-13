@@ -8,11 +8,11 @@ and egui interface, packaged as a NativeActivity APK for sideloading on arm64 de
 | Upstream project | [`storytold/wordcraft`](https://github.com/storytold/wordcraft) — Apache-2.0 OR MIT |
 | Pinned commit | `2ffba93` (upstream version `0.5.0`) |
 | Android package | `ai.storyteller.wordcraft` |
-| Published APK | `wordcraft-0.5.0-arm64-v8a-20261013.apk` — 19.9 MB, arm64-v8a, signed (release **v0.1.1**, 2026-10-13) |
-| APK sha256 | `9c21e2ab11f91c89bc00188d685d55b800688eabf2d531a335ea08a9caf619f8` |
+| Published APK | `wordcraft-0.5.0-arm64-v8a-20261013b.apk` — 19.9 MB, arm64-v8a, signed (release **v0.1.2**, 2026-10-13) |
+| APK sha256 | `05065f17c115a5fed20f9ed6f04dcd1cd6b31bd8128e8177031e8d6f9a522ca5` |
 | Upstream files changed | 2 files (`Cargo.toml`, `crates/ui-egui/src/lib.rs`) — see [`patches/`](patches/) |
 | Vendored crates | `vendor/winit/` — required by the manifest patch, copied in with the crate |
-| New port crate | `apps/wordcraft-android/` — 1092 lines of Rust plus resources |
+| New port crate | `apps/wordcraft-android/` — 1554 lines of Rust plus resources |
 
 ## What this repository is
 

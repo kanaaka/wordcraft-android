@@ -39,6 +39,34 @@ pub struct Tracked {
     shift: bool,
 }
 
+/// A modifier a key event is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Modifier {
+    Alt,
+    Ctrl,
+    Shift,
+}
+
+/// Which modifier a key event is *about*, from its logical or its physical key.
+///
+/// Both have to be consulted, and on Android it is the physical one that matters: winit's
+/// logical-key table names `Shift` and `Alt` but **not** `Control` (see
+/// `platform_impl/android/keycodes.rs::to_logical`), so a Ctrl press arrives with an unidentified
+/// logical key and only its `physical_key` — which maps `CtrlLeft`/`CtrlRight` to
+/// `ControlLeft`/`ControlRight` — says what it was. That asymmetry is precisely what a user sees:
+/// Shift+click and Shift+arrow work, Ctrl+anything does nothing.
+fn modifier(key: &egui::Key, physical_key: &Option<egui::Key>) -> Option<Modifier> {
+    for k in std::iter::once(key).chain(physical_key.iter()) {
+        match k {
+            egui::Key::ShiftLeft | egui::Key::ShiftRight => return Some(Modifier::Shift),
+            egui::Key::ControlLeft | egui::Key::ControlRight => return Some(Modifier::Ctrl),
+            egui::Key::AltLeft | egui::Key::AltRight => return Some(Modifier::Alt),
+            _ => {}
+        }
+    }
+    None
+}
+
 impl Tracked {
     /// Fold this frame's events into the tracked state and report it back into them.
     ///
@@ -75,13 +103,12 @@ impl Tracked {
     /// Update from one event.
     fn observe(&mut self, event: &egui::Event) {
         match event {
-            // A modifier key going down or coming up. Physical keys: winit reports the left and
-            // right keys separately, and either of them is "the" modifier.
-            egui::Event::Key { key, pressed, .. } => match key {
-                egui::Key::ShiftLeft | egui::Key::ShiftRight => self.shift = *pressed,
-                egui::Key::ControlLeft | egui::Key::ControlRight => self.ctrl = *pressed,
-                egui::Key::AltLeft | egui::Key::AltRight => self.alt = *pressed,
-                _ => {}
+            // A modifier key going down or coming up.
+            egui::Event::Key { key, physical_key, pressed, .. } => match modifier(key, physical_key) {
+                Some(Modifier::Shift) => self.shift = *pressed,
+                Some(Modifier::Ctrl) => self.ctrl = *pressed,
+                Some(Modifier::Alt) => self.alt = *pressed,
+                None => {}
             },
             // The platform reported them itself. It never does on Android, but egui-winit
             // synthesises one when the window loses focus, and that report is authoritative: it is
@@ -93,5 +120,83 @@ impl Tracked {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Key, Modifiers};
+
+    fn key(k: Key, physical: Option<Key>, pressed: bool) -> Event {
+        Event::Key { key: k, physical_key: physical, pressed, repeat: false, modifiers: Modifiers::default() }
+    }
+
+    fn run(t: &mut Tracked, events: Vec<Event>) -> egui::RawInput {
+        let mut raw = egui::RawInput { events, ..Default::default() };
+        t.apply(&mut raw);
+        raw
+    }
+
+    /// What the frame reports: egui reads modifiers from `ModifiersChanged` and nowhere else, so every
+    /// frame must end with one.
+    fn reported(raw: &egui::RawInput) -> Modifiers {
+        match raw.events.last() {
+            Some(Event::ModifiersChanged(m)) => *m,
+            other => panic!("a frame must end with ModifiersChanged: {other:?}"),
+        }
+    }
+
+    /// The bug this module exists for, in the form Android reports it: winit's logical-key table does
+    /// not name the Control keys, so when the physical key is the only one that identifies them the
+    /// event must still be understood. Tracking only the logical key is what left every Ctrl shortcut
+    /// dead while Shift worked.
+    #[test]
+    fn ctrl_is_understood_from_either_the_logical_or_the_physical_key() {
+        assert_eq!(modifier(&Key::ControlLeft, &None), Some(Modifier::Ctrl));
+        assert_eq!(modifier(&Key::ControlRight, &None), Some(Modifier::Ctrl));
+        // The case that matters: the *logical* key says nothing useful (here: an ordinary A) and the
+        // physical key is what identifies the modifier.
+        assert_eq!(modifier(&Key::A, &Some(Key::ControlLeft)), Some(Modifier::Ctrl));
+        assert_eq!(modifier(&Key::ShiftLeft, &None), Some(Modifier::Shift));
+        assert_eq!(modifier(&Key::A, &Some(Key::A)), None, "an ordinary key is not a modifier");
+    }
+
+    /// Tracked and released through `apply`, and the state persists across frames with no events
+    /// (which is most frames — the key press and the shortcut it enables are usually in different ones).
+    #[test]
+    fn a_held_modifier_is_reported_in_frames_with_no_events() {
+        let mut t = Tracked::default();
+        let m = reported(&run(&mut t, vec![key(Key::ControlLeft, Some(Key::ControlLeft), true)]));
+        assert!(m.ctrl && m.command, "Ctrl is egui's command modifier: {m:?}");
+        assert!(!m.mac_cmd && !m.shift && !m.alt);
+        let quiet = run(&mut t, vec![]);
+        assert!(reported(&quiet).ctrl, "a frame with no events still reports what is held");
+        assert_eq!(quiet.events.len(), 1, "and its only event is that report");
+        let released = reported(&run(&mut t, vec![key(Key::ControlLeft, Some(Key::ControlLeft), false)]));
+        assert!(!released.ctrl, "released");
+    }
+
+    /// Order inside one batch: a press applies to the events after it, not before it.
+    #[test]
+    fn the_state_is_the_one_at_that_point_in_the_batch() {
+        let click = |pressed: bool| Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::default(),
+        };
+        let mut t = Tracked::default();
+        let mut raw = egui::RawInput {
+            events: vec![click(true), key(Key::ShiftLeft, None, true), click(true)],
+            ..Default::default()
+        };
+        t.apply(&mut raw);
+        let carried = |e: &Event| match e {
+            Event::PointerButton { modifiers, .. } => *modifiers,
+            other => panic!("no modifiers on {other:?}"),
+        };
+        assert!(!carried(&raw.events[0]).shift, "the first click came before the press");
+        assert!(carried(&raw.events[2]).shift, "the second came after it");
     }
 }

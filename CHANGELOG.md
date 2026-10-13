@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.1.2 — 2026-10-13 (Ctrl shortcuts)
+
+| | |
+|---|---|
+| APK | `wordcraft-0.5.0-arm64-v8a-20261013b.apk` (19.9 MB) — supersedes the v0.1.1 asset, same signing key |
+| sha256 | `05065f17c115a5fed20f9ed6f04dcd1cd6b31bd8128e8177031e8d6f9a522ca5` |
+| Built from | upstream `storytold/wordcraft` @ `2ffba93b5189410a415970be179dcf481092d756` + this repository at the commit that released it |
+| Package | `ai.storyteller.wordcraft` — versionName `0.5.0`, versionCode `16778496`, minSdk 26, targetSdk 35 |
+| ABI | `arm64-v8a` only |
+
+### Fixed
+- **Ctrl+anything did nothing, while Shift+click and Shift+arrow worked.** winit's Android
+  logical-key table names `Shift` and `Alt` but **not** `Control` — so a Ctrl press arrives with an
+  unidentified *logical* key (egui-winit falls back to the physical one) while its physical key is
+  correctly `ControlLeft`/`ControlRight`. `src/modifiers.rs` matched the logical key alone, so it
+  never saw Ctrl go down: Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+S, Ctrl+B and every other modifier shortcut
+  was dead, and only the modifiers winit happens to name worked. The tracker now reads the physical
+  key as well as the logical one, on both left and right, and keeps everything else: the per-event
+  modifier copies (so a press and a click in one frame stay ordered) and `ModifiersChanged` as the
+  authority (so a modifier held while the app goes to the background does not stick).
+  Verified on an Android 15 emulator: with text typed in the document, `Ctrl+A` selects it
+  (the mini format bar appears) and `Ctrl+B` emboldens it, ribbon state included.
+
 ## v0.1.1 — 2026-10-13 (scrolling, modifiers, fonts, picker wording)
 
 | | |
