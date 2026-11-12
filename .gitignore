@@ -1,6 +1,7 @@
 # build output and local signing material — never part of this repository
 target/
 *.apk
+*.apk.idsig
 *.jks
 *.keystore
 .gradle/

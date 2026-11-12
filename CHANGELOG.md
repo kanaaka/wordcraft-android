@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.0-files-ru.3 — 2026-11-12
+
+- Keep the built-in Open dialog. Open and Save As request path-based storage
+  access through Android's main thread and navigate to shared storage after a grant.
+- Keep all picker labels in Russian, add Show all files, use the actual Android
+  user/profile storage root, and list removable storage volumes.
+- Register ACTION_VIEW document MIME types so WordCraft appears in Open with.
+  Handle both initial launch and new intents; resolve content URIs on a worker and
+  preserve the editor's unsaved-changes/password prompts when opening the result.
+- Raise versionCode to 16778499, keeping the existing signing key. All 12 shell tests
+  pass, and the user reported the final APK working on their Android device.
+
+## Unreleased — storage access
+
+### Fixed
+- **The app could not see the tablet's documents and never asked for access.** "All files access"
+  (`MANAGE_EXTERNAL_STORAGE`) is declared in the manifest but is not a runtime permission: the
+  system never prompts for it, and the toggle lives behind a Settings screen the app has to open
+  itself. Nothing opened it, and the picker drew locked folders as disabled buttons, so there was no
+  way to ask either. The new `src/permissions.rs` detects the state (`isExternalStorageManager()` on
+  Android 11+, `checkSelfPermission` before that) and sends the user to the right screen —
+  `All files access` on 11+, the ordinary storage-permission dialog on 8–10 — with the app's own
+  details page as a fallback for OEM Settings builds. The picker opens it once per process when the
+  first Open dialog appears, keeps an **Allow file access** button in that dialog, and makes a
+  padlocked folder tappable. Open now starts in `Documents`/`Download` once they are readable, and
+  startup logs whether shared storage is granted.
+- **The documented build recipe failed with current `cargo-apk` (and would not have launched if it
+  had packaged).** The `[lib]` target was called `wordcraft`, while `cargo-apk` derives both the
+  library it looks for and the `android.app.lib_name` meta-data from the *package* name
+  (`wordcraft_android`); packaging therefore stopped at `libwordcraft_android.so doesn't exist`.
+  The `[lib]` name now matches the package, so the packaged library and the manifest agree.
+
 ## v0.1.2 — 2026-10-13 (Ctrl shortcuts)
 
 | | |
