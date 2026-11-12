@@ -19,27 +19,21 @@
 //!
 //! Before Android 11 the same access is the ordinary `READ_EXTERNAL_STORAGE` runtime
 //! permission, so on API 26–29 the module asks for that (plus `WRITE_EXTERNAL_STORAGE`, which
-//! saving needs there too) with `Activity.requestPermissions`. `android-activity` 0.6 never
+//! saving needs there too) with `Activity.requestPermissions`. The packaged manifest
+//! also opts out of scoped storage on API 29. `android-activity` 0.6 never
 //! forwards `onRequestPermissionsResult`, and nothing here needs it: the app keeps drawing its
 //! own frame, and [`granted`] notices the change on a later frame.
 //!
 //! # Why the answer is cached
 //!
 //! [`granted`] is asked once per frame while the picker is open, and on API 30+ answering means
-//! a call into the system. A "yes" is kept for the life of the process; a "no" only for a
-//! second, so the settings screen the user was just sent to is noticed as soon as they are back.
+//! a call into the system. Both answers are cached for one second, so grants and
+//! revocations made while the app is in the background are noticed on return.
 //!
 //! # What this module deliberately does not do
 //!
 //! Nothing here reads or writes a document. It only says whether the filesystem will let the
 //! picker list a folder, and opens the one system screen that changes the answer.
-
-/// The application id. Written a second time because the settings intent needs
-/// `package:<id>` and `cargo-apk` reads the id from the manifest; the test below keeps the two
-/// in agreement, because a mismatch opens *another app's* settings screen and looks like the
-/// button does nothing.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(crate) const PACKAGE: &str = "ai.storyteller.wordcraft";
 
 /// Whether the app may read shared storage (`Documents`, `Download`, …) by path.
 ///
@@ -64,7 +58,7 @@ pub fn granted() -> bool {
     let now = std::time::Instant::now();
     if let Ok(cache) = android::CACHE.lock()
         && let Some((at, answer)) = *cache
-        && (answer || now.duration_since(at) < android::CACHE_NO)
+        && now.duration_since(at) < android::CACHE_NO
     {
         return answer;
     }
@@ -93,35 +87,19 @@ mod android {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    use jni::objects::{JObject, JObjectArray, JString, JValue};
+    use jni::objects::{JObject, JValue};
     use jni::signature::RuntimeMethodSignature;
     use jni::strings::JNIStr;
     use jni::Env;
 
-    use super::PACKAGE;
+
 
     /// The permission that stands in for "All files access" before Android 11.
     const READ: &str = "android.permission.READ_EXTERNAL_STORAGE";
-    /// Only meaningful up to Android 9; saving into shared storage needs it there.
-    const WRITE: &str = "android.permission.WRITE_EXTERNAL_STORAGE";
-
-    /// `Activity.requestPermissions` wants an `int` request code. Only its stability within the
-    /// process matters, since no result is delivered back to us; "WC" keeps it recognisable in
-    /// a system log.
-    const REQUEST_CODE: i32 = 0x5743;
-
-    /// How long a "not granted" answer is trusted. A "granted" one is trusted forever: leaving
-    /// the app is what would revoke it, and that stops these frames anyway.
+    /// Cache either answer briefly; settings can change while the app is backgrounded.
     pub(super) const CACHE_NO: Duration = Duration::from_secs(1);
 
     pub(super) static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
-
-    /// The two actions that lead to the toggle. The strings are the platform's own constants
-    /// (`Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION` and
-    /// `Settings.ACTION_APPLICATION_DETAILS_SETTINGS`); passing them as values keeps this code
-    /// out of the `Settings` class and its field signatures.
-    const ACTION_ALL_FILES: &str = "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION";
-    const ACTION_APP_DETAILS: &str = "android.settings.APPLICATION_DETAILS_SETTINGS";
 
     /// A literal class or method name, as the JNI functions want it: NUL-terminated MUTF-8.
     fn name(n: &'static CStr) -> &'static JNIStr {
@@ -183,89 +161,12 @@ mod android {
         })
     }
 
-    /// Show whichever system screen hands this access out on this Android version.
-    pub(super) fn request_access(sdk: i32) -> Option<()> {
+    /// Ask the Java Activity to post the system UI request to Android's main thread.
+    pub(super) fn request_access(_sdk: i32) -> Option<()> {
         with_env(|env, activity| {
-            if sdk >= 30 {
-                open_all_files_settings(env, activity)
-            } else {
-                request_runtime_storage(env, activity, sdk)
-            }
+            let signature = RuntimeMethodSignature::from_str("()V")?;
+            env.call_method(activity, name(c"requestStorageAccess"), signature.method_signature(), &[])?;
+            Ok(())
         })
-    }
-
-    /// `Settings ▸ Apps ▸ Special access ▸ All files access ▸ WordCraft`.
-    ///
-    /// A few OEM Settings builds do not handle the app-specific action; on those the app's own
-    /// details page is opened instead, where the same toggle is one tap deeper. A failed
-    /// `startActivity` leaves a Java exception pending, so it is described and cleared before
-    /// the second attempt — otherwise every later JNI call would fail too.
-    fn open_all_files_settings(env: &mut Env, activity: &JObject) -> jni::errors::Result<()> {
-        if let Err(e) = launch(env, activity, ACTION_ALL_FILES) {
-            if env.exception_check() {
-                env.exception_describe();
-                env.exception_clear();
-            }
-            log::warn!("storage access: the All-files-access screen failed ({e}); opening app settings");
-            launch(env, activity, ACTION_APP_DETAILS)?;
-        }
-        Ok(())
-    }
-
-    /// `Intent(action).setData(Uri.parse("package:<id>")).startActivity(activity)`.
-    fn launch(env: &mut Env, activity: &JObject, action: &str) -> jni::errors::Result<()> {
-        let signature = RuntimeMethodSignature::from_str;
-        let ctor = signature("(Ljava/lang/String;)V")?;
-        let action = env.new_string(action)?;
-        let intent =
-            env.new_object(name(c"android/content/Intent"), ctor.method_signature(), &[JValue::Object(&action)])?;
-
-        let parse = signature("(Ljava/lang/String;)Landroid/net/Uri;")?;
-        let data = env.new_string(format!("package:{PACKAGE}"))?;
-        let uri = env
-            .call_static_method(name(c"android/net/Uri"), name(c"parse"), parse.method_signature(), &[JValue::Object(&data)])?
-            .l()?;
-
-        let set_data = signature("(Landroid/net/Uri;)Landroid/content/Intent;")?;
-        env.call_method(&intent, name(c"setData"), set_data.method_signature(), &[JValue::Object(&uri)])?;
-
-        let start = signature("(Landroid/content/Intent;)V")?;
-        env.call_method(activity, name(c"startActivity"), start.method_signature(), &[JValue::Object(&intent)])?;
-        Ok(())
-    }
-
-    /// The pre-Android-11 equivalent: the ordinary runtime-permission dialog.
-    fn request_runtime_storage(env: &mut Env, activity: &JObject, sdk: i32) -> jni::errors::Result<()> {
-        let read = env.new_string(READ)?;
-        // Read and write live in one permission group, so one dialog covers both; write is only
-        // meaningful (and only declared) up to Android 9.
-        let with_write = sdk < 29;
-        let permissions = JObjectArray::<JString>::new(env, usize::from(with_write) + 1, &read)?;
-        if with_write {
-            let write = env.new_string(WRITE)?;
-            permissions.set_element(env, 1, &write)?;
-        }
-        let signature = RuntimeMethodSignature::from_str("([Ljava/lang/String;I)V")?;
-        let permissions: &JObject = permissions.as_ref();
-        env.call_method(
-            activity,
-            name(c"requestPermissions"),
-            signature.method_signature(),
-            &[JValue::Object(permissions), JValue::Int(REQUEST_CODE)],
-        )?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// The package id exists in two places — `Cargo.toml` (what the APK is installed as) and
-    /// [`super::PACKAGE`] (what the settings intent carries) — and Android opens *another
-    /// app's* settings screen if they drift apart, which looks exactly like a dead button.
-    #[test]
-    fn package_name_matches_the_manifest() {
-        let manifest = include_str!("../Cargo.toml");
-        let expected = format!("package = \"{}\"", super::PACKAGE);
-        assert!(manifest.contains(&expected), "permissions.rs PACKAGE no longer matches Cargo.toml ({expected})");
     }
 }

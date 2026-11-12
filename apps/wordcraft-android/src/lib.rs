@@ -43,10 +43,8 @@
 //!   already has the asynchronous seam for exactly this (`file_dialog`, a request whose answer
 //!   arrives later through a channel — the desktop shell uses it so the window never freezes),
 //!   so Open, Save As, Export, Insert Picture and the mail-merge recipient list all work: the
-//!   picker browses the app's own folder with no permission at all, and offers a shared-storage
-//!   root only when it can actually read it. Android's *own* picker is still future work: the
-//!   Storage Access Framework needs `startActivityForResult`, which `android-activity` 0.6 does
-//!   not expose.
+//!   built-in picker opens original paths and requests shared-storage access when needed.
+//!   Android's external "Open with" flow is handled separately by the Activity's URI inbox.
 //! - **No system clipboard.** `arboard` has no Android backend, so `clipboard_picture` stays
 //!   `None`: Paste still handles text through egui, but a picture copied in another app is not
 //!   offered.
@@ -65,6 +63,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(target_os = "android")]
 use wordcraft_engine::Session;
 use wordcraft_ui_egui::{FileDialogRequest, Services, UiState, WordApp};
 
@@ -73,6 +72,8 @@ mod modifiers;
 mod permissions;
 mod prefs_watch;
 mod touch_scroll;
+#[cfg(target_os = "android")]
+mod android_files;
 
 /// The app's private data directory, captured in `android_main` before any service closure
 /// runs: `<internal storage>/Android/data/ai.storyteller.wordcraft/files`.
@@ -139,8 +140,8 @@ fn open_extensions(purpose: &str) -> Option<Vec<String>> {
 /// `Option<String>` the app is polling for. One thread per pick, and it ends with the request.
 fn file_dialog(req: FileDialogRequest) -> Receiver<Option<String>> {
     let (kind, title, extensions, suggested) = match req {
-        FileDialogRequest::Open { purpose } => (file_picker::Kind::Open, "Open \u{2014} Android", open_extensions(&purpose), None),
-        FileDialogRequest::Save { name } => (file_picker::Kind::Save, "Save As \u{2014} Android", None, Some(name)),
+        FileDialogRequest::Open { purpose } => (file_picker::Kind::Open, file_picker::text("Open file", "Открыть файл"), open_extensions(&purpose), None),
+        FileDialogRequest::Save { name } => (file_picker::Kind::Save, file_picker::text("Save As", "Сохранить как"), None, Some(name)),
     };
     let paths = file_picker::request(kind, title, extensions, suggested);
     let (answer, rx) = std::sync::mpsc::channel();
@@ -153,6 +154,12 @@ fn file_dialog(req: FileDialogRequest) -> Receiver<Option<String>> {
         log::error!("couldn't start the file-dialog thread: {e}");
     }
     rx
+}
+
+/// Use the editor's user-command path, preserving its save-changes and password dialogs.
+#[cfg(any(target_os = "android", test))]
+fn open_external_document(app: &mut WordApp, path: String) {
+    let _ = app.run("file.open", serde_json::json!({"path": path}));
 }
 
 // This window's `AndroidApp`, kept for what the app asks of the platform *after* start-up —
@@ -470,6 +477,17 @@ impl Shell {
 impl eframe::App for Shell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.inner.logic(ctx);
+        #[cfg(target_os = "android")]
+        {
+            // A file manager may deliver a document during startup or to an existing Activity.
+            // Use the editor's normal command so unsaved changes/password prompts still apply.
+            if !file_picker::is_open() && self.inner.dialog.is_none()
+                && let Some(path) = android_files::take_opened_document()
+            {
+                open_external_document(&mut self.inner, path);
+            }
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
         if self.prefs.due() {
             let bytes = prefs_bytes(&self.inner);
             self.prefs.store(&bytes);
@@ -506,6 +524,17 @@ impl eframe::App for Shell {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn external_open_preserves_unsaved_document_until_confirmation() {
+        let mut app = wordcraft_ui_egui::WordApp::new(
+            wordcraft_engine::Session::new(wordcraft_doc::Document::new()), super::android_services());
+        app.run("text.insert", serde_json::json!({"text": "Unsaved work"})).unwrap();
+        super::open_external_document(&mut app, "incoming.docx".into());
+        assert!(matches!(app.dialog, Some(wordcraft_ui_egui::dialogs::Dialog::SaveChanges { .. })));
+        assert!(app.session.dirty);
+        assert!(app.session.path.is_none());
+    }
+
     /// The vendored winit is what lets a mouse or a trackpad scroll an Android build at all.
     /// Upstream's Android backend drops `MotionAction::Scroll` and `HoverMove` (they fall into
     /// `_ => None // TODO mouse events`), so a dependency bump that resolves winit from crates.io

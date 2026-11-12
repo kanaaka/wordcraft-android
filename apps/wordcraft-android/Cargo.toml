@@ -22,8 +22,8 @@ crate-type = ["cdylib"]
 # `#[unsafe(no_mangle)]` entry point this crate needs, and nothing else here wants the lints.
 [dependencies]
 # `jni` is the same 0.22 android-activity itself depends on, so this unifies rather than
-# compiling a second JNI layer. It is used for exactly one thing: sending the intent that opens a
-# second window (`new_window`), which no manifest metadata can express (see `src/lib.rs`).
+# compiling a second JNI layer. Used by the system document picker, storage access,
+# and the intent that opens a second window.
 jni = "0.22"
 wordcraft-doc = { workspace = true }
 wordcraft-engine = { workspace = true }
@@ -64,6 +64,7 @@ min_sdk_version = 26
 target_sdk_version = 35
 
 [package.metadata.android.application]
+has_code = true
 label = "WordCraft"
 # Variant B (immersive fullscreen) is what fixed the menu bar sitting under the notification
 # bar on the tablet; variant A is the alternative — see res/values/styles.xml.
@@ -82,7 +83,31 @@ extract_native_libs = true
 # cargo-apk's default is only `orientation|keyboardHidden|screenSize`; these are the ones a
 # fullscreen, resizable native app handles itself.
 [package.metadata.android.application.activity]
+name = "ai.storyteller.wordcraft.WordcraftActivity"
+launch_mode = "singleTop"
 config_changes = "orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|density|uiMode|fontScale|keyboard|navigation|touchscreen"
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT"]
+data = [
+    { mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    { mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.template" },
+    { mime_type = "application/vnd.ms-word.document.macroEnabled.12" },
+    { mime_type = "application/vnd.ms-word.template.macroEnabled.12" },
+    { mime_type = "application/msword" },
+    { mime_type = "application/vnd.oasis.opendocument.text" },
+    { mime_type = "application/rtf" },
+    { mime_type = "text/rtf" },
+    { mime_type = "text/plain" },
+    { mime_type = "text/markdown" },
+    { mime_type = "text/x-markdown" },
+    { mime_type = "text/html" },
+    { mime_type = "text/x-tex" },
+    { mime_type = "application/x-tex" },
+    { mime_type = "application/json" },
+    { mime_type = "application/octet-stream" },
+]
 
 
 # Rendering is a CPU rasteriser (vello_cpu) plus egui's wgpu present, so Vulkan is preferred

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0-files-ru.3 — 2026-11-12
+
+- Keep the built-in Open dialog. Open and Save As request path-based storage
+  access through Android's main thread and navigate to shared storage after a grant.
+- Keep all picker labels in Russian, add Show all files, use the actual Android
+  user/profile storage root, and list removable storage volumes.
+- Register ACTION_VIEW document MIME types so WordCraft appears in Open with.
+  Handle both initial launch and new intents; resolve content URIs on a worker and
+  preserve the editor's unsaved-changes/password prompts when opening the result.
+- Raise versionCode to 16778499, keeping the existing signing key. All 12 shell tests
+  pass, and the user reported the final APK working on their Android device.
+
 ## Unreleased — storage access
 
 ### Fixed

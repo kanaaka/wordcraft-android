@@ -4,10 +4,8 @@
 //!
 //! `rfd` has no Android backend (its `backend.rs` compiles no module at all for a
 //! target that is neither Linux/BSD, macOS, Windows nor wasm32), and Android's
-//! own picker — the Storage Access Framework — needs `startActivityForResult`,
-//! which `android-activity` 0.6 does not expose. So a ported desktop app has no
-//! file dialogs at all: Open and Save As are silently treated as cancelled.
-//! This module draws the picker instead.
+//! own picker is not needed here: this module supplies the built-in Open and Save As
+//! dialogs, with shared-storage access requested through the Android Activity.
 //!
 //! # How it plugs in
 //!
@@ -57,7 +55,7 @@
 //!   "All files access" (`MANAGE_EXTERNAL_STORAGE`), which is not a runtime
 //!   permission: the system only offers the toggle in
 //!   Settings ▸ Apps ▸ <App> ▸ Special access. The picker therefore *asks* for it
-//!   through [`crate::permissions`] — the first dialog of a process opens that
+//!   through [`crate::permissions`] — the first in-app dialog of a process opens that
 //!   screen, and a locked root or the banner opens it again — instead of just
 //!   drawing a padlock and leaving the user there. All the storage permissions
 //!   are declared in the crate's `Cargo.toml`.
@@ -80,27 +78,40 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 /// there is one such folder.
 pub static EXT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-const SHARED_ROOT: &str = "/storage/emulated/0";
+fn storage_root_from(external_files: &Path) -> Option<&Path> {
+    let android = external_files.ancestors().nth(3)?;
+    (android.file_name()? == "Android").then(|| android.parent()).flatten()
+}
+
+fn shared_root() -> &'static Path {
+    EXT_DIR.get().and_then(|p| storage_root_from(p)).unwrap_or_else(|| Path::new("/storage/emulated/0"))
+}
 
 /// The shared folders the picker offers, root included: the places user documents actually
 /// live. Whether each one can be read is probed per frame — that is what makes the picker
 /// honest about a missing grant.
 fn shared_roots() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> =
-        ["Download", "Pictures", "DCIM", "Documents"].iter().map(|sub| Path::new(SHARED_ROOT).join(sub)).collect();
-    v.push(PathBuf::from(SHARED_ROOT));
+        ["Download", "Pictures", "DCIM", "Documents"].iter().map(|sub| shared_root().join(sub)).collect();
+    v.push(shared_root().to_path_buf());
     v
 }
 
-/// Whether the shared folders exist but cannot be read — the one problem the picker cannot fix
-/// by itself, because Android hands "All files access" out in a system screen.
+/// Whether shared-storage access is missing. Scoped storage can return an empty
+/// directory listing instead of a permission error, so inspect the grant itself.
 fn needs_access() -> bool {
-    !crate::permissions::granted() && shared_roots().iter().any(|p| !readable(p))
+    // Scoped storage may allow listing a directory but hide all of its documents.
+    // A successful read_dir is therefore not proof of shared-storage access.
+    !crate::permissions::granted()
+}
+
+/// Match the editor's selected interface language, including changes made in Options.
+pub fn text(en: &'static str, ru: &'static str) -> &'static str {
+    if wordcraft_ui_egui::i18n::current().code() == "ru" { ru } else { en }
 }
 
 /// Whether the system screen has been opened for this process already. It is opened once, when
-/// the first *open* dialog appears, so a user who never touches a locked root still learns why
-/// the tablet looks empty — and never gets thrown into Settings on every Open afterwards.
+/// the first in-app dialog appears; subsequent dialogs keep a manual access button.
 static ASKED: AtomicBool = AtomicBool::new(false);
 
 /// Which dialog is open.
@@ -132,6 +143,10 @@ struct Pending {
     note: Option<String>,
     /// Whether the starting directory was already applied.
     started: bool,
+    /// Move to shared storage once after returning from the permission screen.
+    awaiting_access: bool,
+    /// Allow inspection of files whose extensions the document filter does not recognise.
+    show_all: bool,
     /// Where the answer goes; the app polls it once a frame.
     answer: Option<Sender<Vec<PathBuf>>>,
 }
@@ -175,6 +190,8 @@ pub fn request(kind: Kind, title: &str, extensions: Option<Vec<String>>, suggest
             picked: Vec::new(),
             note: None,
             started: false,
+            awaiting_access: false,
+            show_all: false,
             answer: Some(tx),
         });
     });
@@ -204,15 +221,23 @@ pub fn cancel() {
 fn roots() -> Vec<(String, PathBuf)> {
     let mut v = Vec::new();
     if let Some(d) = EXT_DIR.get() {
-        v.push(("App folder".to_string(), d.clone()));
+        v.push((text("App folder", "Папка приложения").to_string(), d.clone()));
         // Sibling of the app's own files, still owned by the app.
         if let Some(parent) = d.parent() {
-            v.push(("App storage".to_string(), parent.to_path_buf()));
+            v.push((text("App storage", "Хранилище приложения").to_string(), parent.to_path_buf()));
         }
     }
-    let labels = ["Download", "Pictures", "DCIM", "Documents", "Internal storage"];
+    let labels = [text("Download", "Загрузки"), text("Pictures", "Изображения"), text("DCIM", "Камера"), text("Documents", "Документы"), text("Internal storage", "Внутренняя память")];
     for (label, path) in labels.into_iter().zip(shared_roots()) {
         v.push((label.to_string(), path));
+    }
+    if let Ok(volumes) = std::fs::read_dir("/storage") {
+        for volume in volumes.flatten() {
+            let name = volume.file_name().to_string_lossy().into_owned();
+            if name != "emulated" && name != "self" && volume.path().is_dir() {
+                v.push((format!("{} ({name})", text("SD card", "Карта памяти")), volume.path()));
+            }
+        }
     }
     v
 }
@@ -293,12 +318,99 @@ fn link_fonts_dir(target: &Path, link: &Path) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_root_follows_android_user_and_external_volume() {
+        for root in ["/storage/emulated/0", "/storage/emulated/10", "/storage/ABCD-1234"] {
+            let files = Path::new(root).join("Android/data/ai.storyteller.wordcraft/files");
+            assert_eq!(storage_root_from(&files), Some(Path::new(root)));
+        }
+        assert_eq!(storage_root_from(Path::new("/data/user/0/package/files")), None);
+    }
+
+    #[test]
+    fn open_dialog_renders_in_russian() {
+        use wordcraft_ui_egui::i18n::{Lang, set_current};
+        set_current(Lang::from_pref("ru"));
+        let _receiver = request(Kind::Open, text("Open file", "Открыть файл"), extensions(&[&["docx"]]), None);
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => texts.push(text.galley.text().to_string()),
+                egui::epaint::Shape::Vec(shapes) => for shape in shapes { collect(shape, texts); },
+                _ => {}
+            }
+        }
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw(ui.ctx()));
+            output.textures_delta.clear();
+            for shape in output.shapes { collect(&shape.shape, &mut texts); }
+        }
+        cancel();
+        set_current(Lang::EN);
+        for expected in ["Открыть файл", "Открыть", "Отмена", "Показать все файлы", "Разрешить доступ к файлам"] {
+            assert!(texts.iter().any(|t| t == expected), "Missing {expected}: {texts:?}");
+        }
+    }
+
+    #[test]
+    fn save_dialog_renders_in_russian() {
+        use wordcraft_ui_egui::i18n::{Lang, set_current};
+        set_current(Lang::from_pref("ru"));
+        let _receiver = request(Kind::Save, text("Save As", "Сохранить как"), None, Some("test.docx".into()));
+        let ctx = egui::Context::default();
+        let mut visible = Vec::new();
+        fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => texts.push(text.galley.text().to_string()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes { collect(shape, texts); }
+                }
+                _ => {}
+            }
+        }
+        // The first egui pass measures the window; subsequent passes paint its text.
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw(ui.ctx()));
+            output.textures_delta.clear(); // This test inspects text without a GPU renderer.
+            for shape in output.shapes { collect(&shape.shape, &mut visible); }
+        }
+        cancel();
+        set_current(Lang::EN);
+        assert!(visible.iter().any(|s| s == "Сохранить как"), "{visible:?}");
+        assert!(visible.iter().any(|s| s == "Отмена"), "{visible:?}");
+        assert!(visible.iter().any(|s| s == "Разрешить доступ к файлам"), "{visible:?}");
+        assert!(!visible.iter().any(|s| s == "Save" || s == "Cancel" || s == "App folder"));
+    }
+
+    #[test]
+    fn listing_keeps_folders_and_matches_uppercase_document_extensions() {
+        let dir = std::env::temp_dir().join(format!("wordcraft-picker-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(dir.join("subfolder")).unwrap();
+        for name in ["Документ.DOCX", "notes.txt", "image.png", ".hidden.docx"] {
+            std::fs::write(dir.join(name), b"test").unwrap();
+        }
+        let (folders, files) = entries(&dir, Some(&vec!["docx".into(), "txt".into()])).unwrap();
+        assert_eq!(folders, vec![dir.join("subfolder")]);
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&dir.join("Документ.DOCX")));
+        assert!(files.contains(&dir.join("notes.txt")));
+        assert_eq!(entries(&dir, None).unwrap().1.len(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
 
 /// The best directory to open first: the app folder is always writable, so it
 /// is the only safe default — a desktop path arriving as a suggestion never
 /// exists on the device.
 fn default_dir() -> PathBuf {
-    EXT_DIR.get().cloned().unwrap_or_else(|| PathBuf::from(SHARED_ROOT))
+    EXT_DIR.get().cloned().unwrap_or_else(|| shared_root().to_path_buf())
 }
 
 /// Where an Open (or folder) dialog starts: the first user-facing folder that can actually be
@@ -308,7 +420,7 @@ fn default_dir() -> PathBuf {
 fn open_start_dir() -> PathBuf {
     ["Documents", "Download"]
         .iter()
-        .map(|sub| Path::new(SHARED_ROOT).join(sub))
+        .map(|sub| shared_root().join(sub))
         .find(|p| readable(p))
         .unwrap_or_else(default_dir)
 }
@@ -318,10 +430,11 @@ fn open_start_dir() -> PathBuf {
 /// dialog.
 fn ask_for_access(pending: &mut Pending) {
     let shown = crate::permissions::request();
+    pending.awaiting_access = shown;
     pending.note = Some(if shown {
-        "Allow WordCraft to see the tablet's storage in the screen that just opened, then come back here.".to_string()
+        text("Allow WordCraft to see the tablet's storage in the screen that just opened, then come back here.", "В открывшемся окне разрешите WordCraft доступ к файлам, затем вернитесь в приложение.").to_string()
     } else {
-        "Grant \u{201C}All files access\u{201D} in Settings \u{25B8} Apps \u{25B8} WordCraft \u{25B8} Special access.".to_string()
+        text("Grant all files access in Android settings.", "Разрешите доступ ко всем файлам в настройках Android: Приложения → Специальный доступ → Доступ ко всем файлам → WordCraft.").to_string()
     });
 }
 
@@ -374,25 +487,27 @@ pub fn draw(ctx: &egui::Context) {
         pending.started = true;
         pending.dir = if kind == Kind::Save { default_dir() } else { open_start_dir() };
         if kind == Kind::Save && pending.name.is_empty() {
-            pending.name = "untitled".to_string();
+            pending.name = text("untitled", "Без названия").to_string();
         }
-        // The first *open* dialog of a process asks for shared storage by itself: the user is
-        // about to look for existing files, and the padlock alone does not say what to do about
-        // it. Save is left alone — it starts in the app folder, which needs no permission — and
-        // the screen is opened at most once per process (see `ASKED`).
-        if kind != Kind::Save && needs_access() && !ASKED.swap(true, Ordering::Relaxed) {
+        // Both Open and Save As need path-based access to public folders.
+        if needs_access() && !ASKED.swap(true, Ordering::Relaxed) {
             ask_for_access(&mut pending);
         }
     }
 
     let locked_out = needs_access();
+    if pending.awaiting_access && !locked_out {
+        pending.awaiting_access = false;
+        pending.dir = open_start_dir();
+        pending.note = None;
+    }
 
     let mut answer: Option<Vec<PathBuf>> = None;
     let mut cancel = false;
     let mut navigate: Option<PathBuf> = None;
 
     let dir = pending.dir.clone();
-    let listing = entries(&dir, pending.extensions.as_ref());
+    let listing = entries(&dir, if pending.show_all { None } else { pending.extensions.as_ref() });
     let multi = kind == Kind::OpenMany;
     // A tablet screen is smaller than the desktop default, and in portrait
     // narrower than a hard-coded desktop width. `content_rect` is the area egui
@@ -417,10 +532,10 @@ pub fn draw(ctx: &egui::Context) {
             if locked_out {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
-                        egui::RichText::new("WordCraft can only see its own folder \u{2014} the tablet's documents are locked.")
+                        egui::RichText::new(text("Shared-storage access is required to browse documents.", "Для просмотра документов нужен доступ к файлам устройства."))
                             .color(egui::Color32::from_rgb(220, 160, 60)),
                     );
-                    if ui.button("\u{1F513} Allow file access").clicked() {
+                    if ui.button(text("Allow file access", "Разрешить доступ к файлам")).clicked() {
                         ask_for_access(&mut pending);
                     }
                 });
@@ -433,15 +548,15 @@ pub fn draw(ctx: &egui::Context) {
                 for (label, path) in roots() {
                     let ok = readable(&path);
                     let here = path == dir;
-                    let text = if ok { label } else { format!("{label} \u{1F512}") };
-                    if ui.add_enabled(!here, egui::Button::new(text)).clicked() {
+                    let caption = if ok { label } else { format!("{label} \u{1F512}") };
+                    if ui.add_enabled(!here, egui::Button::new(caption)).clicked() {
                         if ok {
                             navigate = Some(path);
                         } else if crate::permissions::granted() {
                             // The permission is there and the folder still cannot be read — a
                             // missing folder, or one this Android version refuses by path (on
                             // Android 10 scoped storage has no "All files access" to grant).
-                            pending.note = Some("Android does not let WordCraft read that folder on this device.".to_string());
+                            pending.note = Some(text("This folder is unavailable or does not exist.", "Эта папка недоступна или не существует.").to_string());
                         } else {
                             ask_for_access(&mut pending);
                         }
@@ -452,12 +567,12 @@ pub fn draw(ctx: &egui::Context) {
 
             // Current path + up
             ui.horizontal_wrapped(|ui| {
-                if ui.button("\u{2B06} Up").clicked()
+                if ui.button(text("↑ Up", "↑ Вверх")).clicked()
                     && let Some(parent) = dir.parent()
                 {
                     navigate = Some(parent.to_path_buf());
                 }
-                if ui.button("\u{1F4C1} App folder").clicked() {
+                if ui.button(text("App folder", "Папка приложения")).clicked() {
                     navigate = Some(default_dir());
                 }
                 ui.label(egui::RichText::new(dir.display().to_string()).monospace().small());
@@ -468,16 +583,19 @@ pub fn draw(ctx: &egui::Context) {
             }
 
             ui.separator();
+            if pending.extensions.is_some() {
+                ui.checkbox(&mut pending.show_all, text("Show all files", "Показать все файлы"));
+            }
             let list_h = (h - 190.0).max(120.0);
             egui::ScrollArea::vertical().max_height(list_h).show(ui, |ui| match &listing {
                 Err(e) => {
-                    ui.label("Cannot read this folder.");
+                    ui.label(text("Cannot read this folder.", "Не удалось прочитать папку."));
                     ui.label(egui::RichText::new(e.clone()).monospace().weak().small());
-                    ui.label("Grant \"All files access\" in Settings \u{25B8} Apps \u{25B8} Special access to browse shared storage.");
+                    ui.label(text("Allow file access to browse shared storage.", "Для просмотра памяти устройства разрешите доступ к файлам."));
                 }
                 Ok((dirs, files)) => {
                     if dirs.is_empty() && files.is_empty() {
-                        ui.label("(empty \u{2014} no matching files)");
+                        ui.label(text("(empty — no matching files)", "(нет подходящих файлов)"));
                     }
                     for d in dirs {
                         if ui.button(format!("\u{1F4C1} {}", file_label(d))).clicked() {
@@ -510,42 +628,42 @@ pub fn draw(ctx: &egui::Context) {
             ui.separator();
             ui.horizontal_wrapped(|ui| match kind {
                 Kind::Save => {
-                    ui.label("File name:");
+                    ui.label(text("File name:", "Имя файла:"));
                     ui.add(egui::TextEdit::singleline(&mut pending.name).desired_width((w - 260.0).max(160.0)));
-                    if ui.button("Save").clicked() {
+                    if ui.button(text("Save", "Сохранить")).clicked() {
                         let name = pending.name.trim().to_string();
                         if name.is_empty() {
-                            pending.note = Some("Enter a file name.".to_string());
+                            pending.note = Some(text("Enter a file name.", "Введите имя файла.").to_string());
                         } else {
                             answer = Some(vec![dir.join(name)]);
                         }
                     }
                 }
                 Kind::Folder => {
-                    if ui.button("Choose this folder").clicked() {
+                    if ui.button(text("Choose this folder", "Выбрать эту папку")).clicked() {
                         answer = Some(vec![dir.clone()]);
                     }
                 }
                 Kind::OpenMany => {
                     let n = pending.picked.len();
-                    let label = if n == 0 { "Place".to_string() } else { format!("Place {n} file(s)") };
+                    let label = if n == 0 { text("Place", "Добавить").to_string() } else { format!("{}: {n}", text("Place files", "Добавить файлов")) };
                     if ui.add_enabled(n > 0, egui::Button::new(label)).clicked() {
                         answer = Some(pending.picked.clone());
                     }
                 }
                 Kind::Open => {
-                    if ui.button("Open").clicked() {
+                    if ui.button(text("Open", "Открыть")).clicked() {
                         // A file has to be tapped in the list above for an Open dialog.
-                        pending.note = Some("Tap a file to open it.".to_string());
+                        pending.note = Some(text("Tap a file to open it.", "Нажмите на файл, чтобы открыть его.").to_string());
                     }
                 }
             });
-            if ui.button("Cancel").clicked() {
+            if ui.button(text("Cancel", "Отмена")).clicked() {
                 cancel = true;
             }
 
             if dir == default_dir() {
-                ui.label(egui::RichText::new("Tip: push files here over USB, or grant \"All files access\" to browse the whole tablet.").weak().small());
+                ui.label(egui::RichText::new(text("Allow file access to save to Documents or Download.", "Разрешите доступ к файлам, чтобы сохранять в папки «Документы» и «Загрузки».")).weak().small());
             }
         });
 
