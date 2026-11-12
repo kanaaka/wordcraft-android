@@ -7,12 +7,15 @@ rust-version.workspace = true
 description = "WordCraft on Android: the real engine and egui shell on winit's NativeActivity backend"
 publish = false
 
-# cargo-apk turns this cdylib into the APK's lib/arm64-v8a/libwordcraft.so, and the artifact
-# name is what the injected `android.app.lib_name` meta-data points at (with `-` → `_`). A
-# mismatch yields an APK that installs and then dies on launch, so the lib name is deliberate:
-# the same shape `apps/vectorcraft-android` and `apps/photocraft-android` use.
+# cargo-apk turns this cdylib into the APK's lib/arm64-v8a/<name>.so and points the injected
+# `android.app.lib_name` meta-data at the same string. It derives that string from the *package*
+# name (`-` → `_`), not from `[lib] name`, so the two have to agree: a library called `wordcraft`
+# builds `libwordcraft.so` while the manifest asks NativeActivity for `libwordcraft_android.so`,
+# and the APK either fails to package (`…/libwordcraft_android.so doesn't exist`) or installs and
+# dies on launch. Keep this equal to the package's `-`→`_` form; `scripts/verify-apk.sh` checks
+# the manifest value against the packaged library.
 [lib]
-name = "wordcraft"
+name = "wordcraft_android"
 crate-type = ["cdylib"]
 
 # Omit `[lints] workspace = true`: the workspace forbids unsafe_code, which trips on the

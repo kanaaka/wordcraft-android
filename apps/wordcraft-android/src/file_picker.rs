@@ -54,13 +54,22 @@
 //!   readable and writable, no permission at all. Files can be pushed there over
 //!   USB.
 //! - **Shared storage** — Download / Pictures / DCIM / Documents. Needs
-//!   "All files access" (`MANAGE_EXTERNAL_STORAGE`, granted by hand in
-//!   Settings ▸ Apps ▸ <App> ▸ Special access) or `READ_MEDIA_IMAGES` for
-//!   reading media. All four are declared in the crate's `Cargo.toml`.
+//!   "All files access" (`MANAGE_EXTERNAL_STORAGE`), which is not a runtime
+//!   permission: the system only offers the toggle in
+//!   Settings ▸ Apps ▸ <App> ▸ Special access. The picker therefore *asks* for it
+//!   through [`crate::permissions`] — the first dialog of a process opens that
+//!   screen, and a locked root or the banner opens it again — instead of just
+//!   drawing a padlock and leaving the user there. All the storage permissions
+//!   are declared in the crate's `Cargo.toml`.
+//!
+//! The picker also starts Open in the user's Documents folder once it is
+//! readable, because that is where the documents are; before the grant it starts
+//! in the app folder, the one place that always works.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// The app's external files directory, captured in `android_main`.
@@ -72,6 +81,27 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 pub static EXT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 const SHARED_ROOT: &str = "/storage/emulated/0";
+
+/// The shared folders the picker offers, root included: the places user documents actually
+/// live. Whether each one can be read is probed per frame — that is what makes the picker
+/// honest about a missing grant.
+fn shared_roots() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> =
+        ["Download", "Pictures", "DCIM", "Documents"].iter().map(|sub| Path::new(SHARED_ROOT).join(sub)).collect();
+    v.push(PathBuf::from(SHARED_ROOT));
+    v
+}
+
+/// Whether the shared folders exist but cannot be read — the one problem the picker cannot fix
+/// by itself, because Android hands "All files access" out in a system screen.
+fn needs_access() -> bool {
+    !crate::permissions::granted() && shared_roots().iter().any(|p| !readable(p))
+}
+
+/// Whether the system screen has been opened for this process already. It is opened once, when
+/// the first *open* dialog appears, so a user who never touches a locked root still learns why
+/// the tablet looks empty — and never gets thrown into Settings on every Open afterwards.
+static ASKED: AtomicBool = AtomicBool::new(false);
 
 /// Which dialog is open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -180,10 +210,10 @@ fn roots() -> Vec<(String, PathBuf)> {
             v.push(("App storage".to_string(), parent.to_path_buf()));
         }
     }
-    for (label, sub) in [("Download", "Download"), ("Pictures", "Pictures"), ("DCIM", "DCIM"), ("Documents", "Documents")] {
-        v.push((label.to_string(), Path::new(SHARED_ROOT).join(sub)));
+    let labels = ["Download", "Pictures", "DCIM", "Documents", "Internal storage"];
+    for (label, path) in labels.into_iter().zip(shared_roots()) {
+        v.push((label.to_string(), path));
     }
-    v.push(("Internal storage".to_string(), PathBuf::from(SHARED_ROOT)));
     v
 }
 
@@ -271,6 +301,30 @@ fn default_dir() -> PathBuf {
     EXT_DIR.get().cloned().unwrap_or_else(|| PathBuf::from(SHARED_ROOT))
 }
 
+/// Where an Open (or folder) dialog starts: the first user-facing folder that can actually be
+/// read, so a tablet that has granted storage shows the user's documents rather than the app's
+/// private folder. Save keeps [`default_dir`]: the app folder is the one place a save always
+/// works, with or without a permission.
+fn open_start_dir() -> PathBuf {
+    ["Documents", "Download"]
+        .iter()
+        .map(|sub| Path::new(SHARED_ROOT).join(sub))
+        .find(|p| readable(p))
+        .unwrap_or_else(default_dir)
+}
+
+/// Open the system screen that hands out shared-storage access, and say in the picker what to
+/// do there. Used by the banner, by a tap on a locked root, and once per process on the first
+/// dialog.
+fn ask_for_access(pending: &mut Pending) {
+    let shown = crate::permissions::request();
+    pending.note = Some(if shown {
+        "Allow WordCraft to see the tablet's storage in the screen that just opened, then come back here.".to_string()
+    } else {
+        "Grant \u{201C}All files access\u{201D} in Settings \u{25B8} Apps \u{25B8} WordCraft \u{25B8} Special access.".to_string()
+    });
+}
+
 fn readable(dir: &Path) -> bool {
     std::fs::read_dir(dir).is_ok()
 }
@@ -318,11 +372,20 @@ pub fn draw(ctx: &egui::Context) {
     // First frame: pick a starting directory.
     if !pending.started {
         pending.started = true;
-        pending.dir = default_dir();
+        pending.dir = if kind == Kind::Save { default_dir() } else { open_start_dir() };
         if kind == Kind::Save && pending.name.is_empty() {
             pending.name = "untitled".to_string();
         }
+        // The first *open* dialog of a process asks for shared storage by itself: the user is
+        // about to look for existing files, and the padlock alone does not say what to do about
+        // it. Save is left alone — it starts in the app folder, which needs no permission — and
+        // the screen is opened at most once per process (see `ASKED`).
+        if kind != Kind::Save && needs_access() && !ASKED.swap(true, Ordering::Relaxed) {
+            ask_for_access(&mut pending);
+        }
     }
+
+    let locked_out = needs_access();
 
     let mut answer: Option<Vec<PathBuf>> = None;
     let mut cancel = false;
@@ -349,14 +412,39 @@ pub fn draw(ctx: &egui::Context) {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             ui.spacing_mut().button_padding = egui::vec2(10.0, 8.0);
 
-            // Roots
+            // Shared storage the app cannot read: say it where the user is already looking for
+            // files, and make the fix one tap away.
+            if locked_out {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new("WordCraft can only see its own folder \u{2014} the tablet's documents are locked.")
+                            .color(egui::Color32::from_rgb(220, 160, 60)),
+                    );
+                    if ui.button("\u{1F513} Allow file access").clicked() {
+                        ask_for_access(&mut pending);
+                    }
+                });
+                ui.separator();
+            }
+
+            // Roots. A locked one stays tappable: tapping it is how the user asks for the
+            // permission the padlock is about.
             ui.horizontal_wrapped(|ui| {
                 for (label, path) in roots() {
                     let ok = readable(&path);
                     let here = path == dir;
                     let text = if ok { label } else { format!("{label} \u{1F512}") };
-                    if ui.add_enabled(ok && !here, egui::Button::new(text)).clicked() {
-                        navigate = Some(path);
+                    if ui.add_enabled(!here, egui::Button::new(text)).clicked() {
+                        if ok {
+                            navigate = Some(path);
+                        } else if crate::permissions::granted() {
+                            // The permission is there and the folder still cannot be read — a
+                            // missing folder, or one this Android version refuses by path (on
+                            // Android 10 scoped storage has no "All files access" to grant).
+                            pending.note = Some("Android does not let WordCraft read that folder on this device.".to_string());
+                        } else {
+                            ask_for_access(&mut pending);
+                        }
                     }
                 }
             });

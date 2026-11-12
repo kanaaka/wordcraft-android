@@ -12,7 +12,7 @@ and egui interface, packaged as a NativeActivity APK for sideloading on arm64 de
 | APK sha256 | `05065f17c115a5fed20f9ed6f04dcd1cd6b31bd8128e8177031e8d6f9a522ca5` |
 | Upstream files changed | 2 files (`Cargo.toml`, `crates/ui-egui/src/lib.rs`) — see [`patches/`](patches/) |
 | Vendored crates | `vendor/winit/` — required by the manifest patch, copied in with the crate |
-| New port crate | `apps/wordcraft-android/` — 1554 lines of Rust plus resources |
+| New port crate | `apps/wordcraft-android/` — 1943 lines of Rust plus resources |
 
 ## What this repository is
 
@@ -64,13 +64,17 @@ adb install -r wordcraft-0.5.0-arm64-v8a-v4.apk
 ```
 or copy the APK to the device and open it (installing from unknown sources must be allowed).
 
-On first run, grant **Settings ▸ Apps ▸ WordCraft ▸ Special access ▸ All files access** if you want
-the in-app picker to reach files outside the app's own folders. Without it, Android 10+ refuses a
-`read_dir` of shared storage by path, and the picker can only offer the app's own directory.
+The first time an Open dialog appears, WordCraft asks for shared-storage access itself: on Android 11+
+it opens **Settings ▸ Apps ▸ WordCraft ▸ Special access ▸ All files access** (the permission has no
+runtime dialog of its own), and on Android 8–10 it shows the ordinary storage-permission dialog.
+Until it is granted, Android refuses a `read_dir` of shared storage by path and the picker can only
+offer the app's own directory — the dialog says so, and an **Allow file access** button (and each
+padlocked folder) opens the same system screen again.
 
 ## Verification status
 
-Everything below was checked on the machine this port was published from, in October 2026.
+Everything below was checked on the machine this port was published from, in October 2026, except the
+row that gives its own date.
 A tick means the check was *run*, not inferred; the wording says how far it goes.
 
 | Claim | How it was checked | Result |
@@ -78,7 +82,7 @@ A tick means the check was *run*, not inferred; the wording says how far it goes
 | `patches/…patch` applies to a clean checkout of the pin | fresh `git init` + `git fetch --depth 1 origin 2ffba93b5189410a415970be179dcf481092d756` + `git apply --check` | ✅ applies cleanly |
 | The assembled tree equals the tree the APK was built from | file-by-file SHA-256 (line endings normalised) over every patched file and every file of the port crate | ✅ 12 files identical, none differing |
 | The port crate compiles for Android | `cargo check -p wordcraft-android --target aarch64-linux-android`, run in a tree assembled from scratch (fresh `git fetch` of the pin, patch applied, port crate copied in) | ✅ exit 0 |
-| The port crate's own tests | `cargo test -p wordcraft-android` in the freshly assembled tree | ✅ 4/4 pass |
+| The port crate's own tests | `cargo test -p wordcraft-android` in the freshly assembled tree | ✅ 8/8 pass (run 2026-11-12 in a tree assembled from this repository) |
 | APK is signed and is the right artifact | `apksigner verify --verbose`, `aapt2 dump badging`, sha256 | ✅ v2/v3 signatures true, `native-code: 'arm64-v8a'`, package `ai.storyteller.wordcraft` |
 | Behaviour on real hardware | hand-testing on the porter's arm64 tablet | ⚠️ the fixes below were found and driven by that testing; each published binary is not individually re-verified here |
 
@@ -90,8 +94,9 @@ fixes. There is no automated device test in this repository.
 
 - **Runtime verification is hand-testing only**, plus the source-side checks in the README. No
   automated device test.
-- **All files access is a manual grant.** Until it is given, the picker can only offer the app's own
-  directory (and says so on the locked root).
+- **All files access is a special-access grant.** The app asks for it by opening the system screen
+  the first time an Open dialog appears (and again from the picker's banner or a padlocked folder),
+  but the permission itself has no runtime dialog, so the user still has to flip the switch there.
 - **A second window is a second Activity**, so it costs a second render surface and its own memory; on
   a low-RAM tablet two heavy documents at once are the tablet's problem, not the app's.
 - **No audio** — `Services::audio_out` stays `None` (`cpal` has no Android backend here).

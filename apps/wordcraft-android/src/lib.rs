@@ -70,6 +70,7 @@ use wordcraft_ui_egui::{FileDialogRequest, Services, UiState, WordApp};
 
 mod file_picker;
 mod modifiers;
+mod permissions;
 mod prefs_watch;
 mod touch_scroll;
 
@@ -164,6 +165,29 @@ fn file_dialog(req: FileDialogRequest) -> Receiver<Option<String>> {
 thread_local! {
     static APP: std::cell::RefCell<Option<winit::platform::android::activity::AndroidApp>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with the JNI handles of this window's Activity.
+///
+/// `None` when there is no Activity to talk to: before `android_main` stored the handle, after
+/// its window ended, and on the host build. The same rule as `APP` itself — per-thread state that
+/// does not outlive the Activity it belongs to.
+#[cfg(target_os = "android")]
+pub(crate) fn with_android_app<R>(f: impl FnOnce(&winit::platform::android::activity::AndroidApp) -> R) -> Option<R> {
+    APP.with(|slot| slot.borrow().as_ref().map(f))
+}
+
+/// The device's API level. Shared-storage access is a different permission before Android 11,
+/// so [`permissions`] has to know which question to ask (see [`permissions::granted`]).
+#[cfg(target_os = "android")]
+fn android_sdk_version() -> i32 {
+    winit::platform::android::activity::AndroidApp::sdk_version()
+}
+
+#[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
+fn android_sdk_version() -> i32 {
+    0
 }
 
 /// Open a second window on this app: a second Activity, so two documents can be put side by side on
@@ -337,6 +361,12 @@ pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
     // Fonts: a folder the user can drop a font file into over USB, pointed at where this app's font
     // scan looks (see `file_picker::register_fonts`).
     file_picker::register_fonts();
+    // Shared storage: say what the app can see, so a log pulled from the tablet explains a picker
+    // that only offers its own folder (see `permissions`).
+    log::info!(
+        "shared-storage access: {}",
+        if permissions::granted() { "granted" } else { "not granted — the picker will offer to ask" }
+    );
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("WordCraft").with_app_id("ai.storyteller.wordcraft"),

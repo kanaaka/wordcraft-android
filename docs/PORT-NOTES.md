@@ -4,8 +4,9 @@ Upstream: [`storytold/wordcraft`](https://github.com/storytold/wordcraft) @
 `2ffba93b5189410a415970be179dcf481092d756` (v0.5.0)
 Published APK: `wordcraft-0.5.0-arm64-v8a-v4.apk`
 
-The port is `apps/wordcraft-android/` (`src/lib.rs` 463 lines, `src/file_picker.rs` 403,
-`src/modifiers.rs` 202, `src/prefs_watch.rs` 134) plus **one small upstream change** — an 8-line seam
+The port is `apps/wordcraft-android/` (`src/lib.rs` 530 lines, `src/file_picker.rs` 568,
+`src/modifiers.rs` 202, `src/permissions.rs` 271, `src/prefs_watch.rs` 141) plus **one small
+upstream change** — an 8-line seam
 in `crates/ui-egui/src/lib.rs` that lets a host open a second window. Everything below is the edit
 log: what was wrong, why, what changed, how far it was checked.
 
@@ -15,9 +16,12 @@ log: what was wrong, why, what changed, how far it was checked.
 so a host supplies what it can and omits the rest. The desktop binary and the browser shell fill it
 their own way; Android is the third. Details that are load-bearing in every port of this set:
 
-- **`[lib] name = "wordcraft"` + `crate-type = ["cdylib"]`** → `lib/arm64-v8a/libwordcraft.so`, and
-  cargo-apk points the injected `android.app.lib_name` at the artifact name (`-` → `_`). A mismatch
-  installs and then dies on launch.
+- **`[lib] name` equal to the package's `-` → `_` form, plus `crate-type = ["cdylib"]`** → the
+  build emits `lib/arm64-v8a/libwordcraft_android.so`, and cargo-apk points the injected
+  `android.app.lib_name` at the same package-derived name. A mismatch either fails packaging
+  (`libwordcraft_android.so doesn't exist`) or installs and then dies on launch, so the names are
+  kept in step. cargo-apk derives the manifest value from the *package*, not from `[lib] name` —
+  which is why this library is no longer called `wordcraft`.
 - **`options.android_app = Some(app)`** — `eframe::run_native` errors without it.
 - **A file logger in the app's own data directory** — `logcat` needs adb, which a sideloaded build
   does not have.
@@ -111,9 +115,10 @@ with no permission at all.
 
 ## 8. Permissions, icon, theme
 
-`MANAGE_EXTERNAL_STORAGE` (granted by hand under Settings ▸ Special access; Google Play restricts it
-to file-manager-class apps, which does not apply to a sideload), `READ_MEDIA_IMAGES` for Android 13+,
-and the two legacy storage permissions capped with `max_sdk_version`. `res/values/styles.xml` carries
+`MANAGE_EXTERNAL_STORAGE` (a special access whose Settings screen the app now opens itself — see the
+2026-11-12 entry; Google Play restricts it to file-manager-class apps, which does not apply to a
+sideload), `READ_MEDIA_IMAGES` for Android 13+, and the two legacy storage permissions capped with
+`max_sdk_version`. `res/values/styles.xml` carries
 the same two-variant edge-to-edge theme as its siblings, needed because `targetSdkVersion 35` puts the
 app under a transparent status bar on Android 15, and `res/mipmap-*` carries the launcher icon.
 
@@ -217,8 +222,10 @@ unlistable to the app on API 35 even with the grant**, so the tell was wrong and
 insulting to the one user who had done what it asked.
 
 Now the note is conditional on the folder being shared storage, is worded as a possibility ("If your
-files are here, the app may lack shared-storage access…"), and leaves the decision to the user,
-because the grant cannot be probed from inside the app.
+files are here, the app may lack shared-storage access…"), and leaves the decision to the user.
+That build could not probe the grant from inside the app; the 2026-11-12 entry below adds the JNI
+probe (`Environment.isExternalStorageManager()`) and the request itself, so the note is now backed
+by an answer rather than a guess.
 
 The USB tip became folder-dependent for the same reason — Android 11+ hides `Android/data` from MTP,
 so a file copied there over a cable never arrives and the folder merely looks empty (which reads as a
@@ -238,6 +245,66 @@ worse than saying nothing.
   authority (so a modifier held while the app goes to the background does not stick).
   Verified on an Android 15 emulator: with text typed in the document, `Ctrl+A` selects it
   (the mini format bar appears) and `Ctrl+B` emboldens it, ribbon state included.
+
+## 2026-11-12 — The app asks for storage access; the picker stops just showing a padlock
+
+**The complaint:** on the tablet WordCraft could not open any document and never asked for access —
+the picker offered only its own folder, every shared folder was padlocked, and tapping a padlock did
+nothing.
+
+**Why:** `MANAGE_EXTERNAL_STORAGE` was declared in the manifest and treated as if that were enough.
+It is a *special* access, not a runtime permission: the system never prompts for it, and the toggle
+lives in a Settings screen that only the app can open. Nothing in the port opened it — and the picker
+drew locked roots as **disabled** buttons, so the one gesture that could have asked for the grant
+was not available either.
+
+**The change — `src/permissions.rs` (new) plus the picker's wiring:**
+
+- `granted()` answers "may this app read shared storage by path?" —
+  `Environment.isExternalStorageManager()` on API 30+, `checkSelfPermission(READ_EXTERNAL_STORAGE)`
+  before that — through JNI on the Activity `android_main` is handed. It is cached, because the
+  picker asks once a frame and the API 30 answer is a call into the system: a "yes" is kept for the
+  life of the process, a "no" for a second.
+- `request()` shows the screen that hands the access out.
+  `ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION` with `package:<id>` as its data opens
+  `Settings ▸ Apps ▸ Special access ▸ All files access ▸ WordCraft` on Android 11+; OEM Settings
+  builds that do not handle that action fall back to the app's own details page (the pending Java
+  exception is described and cleared between the two attempts, or every later JNI call would fail).
+  On Android 8–10, where "All files access" does not exist yet, it is the ordinary
+  `Activity.requestPermissions(READ/WRITE_EXTERNAL_STORAGE)` dialog. `android-activity` 0.6 never
+  forwards `onRequestPermissionsResult`, and nothing waits for one: the frame goes on and
+  `granted()` notices the change on a later frame.
+- The picker opens that screen **once per process**, when the first Open dialog of the process
+  appears, keeps a banner with an **Allow file access** button while shared storage is unreadable, and makes a
+  padlocked root tappable — the tap asks for the permission instead of doing nothing. A root that is
+  still unreadable *with* the permission says so rather than asking again.
+- Open and Folder dialogs now start in `Documents`/`Download` when one of them is readable. Before,
+  they always started in the app's own folder, which is why the tablet's documents were never on
+  screen even after a grant. Save still starts in the app folder, the one place a save works without
+  any permission.
+- Startup logs the state (`shared-storage access: granted` / `not granted`), so a log pulled from the
+  tablet explains an empty-looking picker.
+
+**Checked:** the module was type-checked against the exact `jni` 0.22.4 that `android-activity` 0.6
+resolves to, with its Android-only half compiled for the host (the `cfg(target_os)` gates swapped for
+a feature and the `AndroidApp` handles stubbed) — both configurations build. The full release APK was
+then built from a tree assembled exactly as the README describes (`cargo apk build --release -p
+wordcraft-android`, NDK r27.2, `aarch64-linux-android`), signed with a local test key, and verified
+(`apksigner`: v2+v3; `aapt2`: package, SDK levels, `arm64-v8a`, `android.app.lib_name` matching the
+packaged `libwordcraft_android.so`). `cargo test -p wordcraft-android` passes 8/8, including the test
+that pins the package id in the module to `Cargo.toml`'s. On-device behaviour is still the porter's
+tablet test, not an automated one: the screens themselves belong to the platform, and the only way to
+be sure is to tap through them.
+
+The build also exposed a separate, pre-existing packaging bug: `cargo-apk` derives both the library
+it looks for and `android.app.lib_name` from the *package* name (`wordcraft_android`), not from
+`[lib] name = "wordcraft"`, so packaging stopped at `libwordcraft_android.so doesn't exist`. The
+`[lib]` name now matches the package; see the Cargo.toml comment.
+
+**One gap this cannot close:** Android 10 enforces scoped storage for an app targeting SDK 35, and
+"All files access" does not exist there, so on that one version shared-storage browsing stays limited
+to what the runtime permission exposes; the picker says so instead of asking again. Android 8–9 are
+covered by the runtime dialog, Android 11+ by the settings screen.
 
 ## What is deliberately *not* in the patch
 
